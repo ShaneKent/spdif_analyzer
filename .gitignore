@@ -1,0 +1,10 @@
+/PLAN.md
+/CHECKPOINTS.md
+/SUBAGENTS.md
+/.agents/
+/.codex/
+/.aws/
+/build*/
+/.cache/
+/artifacts/
+__pycache__/
