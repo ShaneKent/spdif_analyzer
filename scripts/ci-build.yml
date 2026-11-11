@@ -1,0 +1,30 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpdifAnalyzer-${{ matrix.os }}
+          path: build/Analyzers/
+  sanitize:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DSPDIF_BUILD_PLUGIN=OFF -DSPDIF_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure

@@ -16,7 +16,7 @@ std::string hex(const std::array<uint8_t,24>& v) {
 }
 struct Decoder::Impl {
  Config cfg; Sink sink; std::deque<uint64_t> edges;
- bool locked=false, have_pending=false, block=false, finished=false, have_last=false;
+ bool locked=false, have_pending=false, block=false, finished=false, have_last=false, input_seen=false;
  Subframe pending{}, last{}; unsigned block_count=0; StatusBlock blocks[2];
  uint64_t last_input=0, last_noise_report=0; double half=0;
  explicit Impl(Config c,Sink s):cfg(c),sink(std::move(s)) {
@@ -97,7 +97,11 @@ struct Decoder::Impl {
   if(!locked) {
    if(have_pending && pending.end+1==f.start && pending.channel!=f.channel && std::abs(t/half-1)<.08) {
     locked=true; emit(pending); emit(f); have_pending=false;
-   } else {pending=f;have_pending=true;}
+   } else {
+    if(have_pending && pending.end+1==f.start && pending.channel==f.channel)
+     diag(f.start,f.end,"channel_order","Consecutive candidate subframes use the same channel; acquisition requires A/B alternation");
+    pending=f;have_pending=true;
+   }
   } else emit(f);
   half=t;
  }
@@ -139,7 +143,8 @@ struct Decoder::Impl {
  }
  void edge(uint64_t sample) {
   if(finished)throw std::logic_error("edge after finish");
-  if(!edges.empty()&&sample<=last_input)throw std::invalid_argument("edge timestamps must increase strictly");
+  if(input_seen&&sample<=last_input)throw std::invalid_argument("edge timestamps must increase strictly");
+  if(!input_seen){last_noise_report=sample;input_seen=true;}
   if(half && double(sample-last_input)>8*half)lose(last_input,"Signal gap");
   last_input=sample;edges.push_back(sample);process();
   // Scanning retains at most one subframe. Noise reporting is rate-limited.
@@ -149,6 +154,7 @@ struct Decoder::Impl {
  }
  void finish(uint64_t end) {
   if(finished)return;
+  if(input_seen && end<last_input)throw std::invalid_argument("capture end precedes last edge");
   process();
   partial(end,"capture ended before confirming block boundary");
   if(edges.size()>1 || have_pending)diag(edges.front(),end,"truncated","Capture ends with an incomplete or unconfirmed subframe");
