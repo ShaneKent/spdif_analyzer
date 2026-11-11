@@ -8,7 +8,7 @@
 
 class SpdifSettings final : public AnalyzerSettings {
 public:
- Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0;
+ Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0; int detail=0;
  SpdifSettings();
  bool SetSettingsFromInterfaces() override;
  void LoadSettings(const char*) override;
@@ -18,6 +18,7 @@ private:
  AnalyzerSettingInterfaceChannel channel_ui;
  AnalyzerSettingInterfaceInteger rate_ui;
  AnalyzerSettingInterfaceNumberList display_ui;
+ AnalyzerSettingInterfaceNumberList detail_ui;
 };
 class SpdifAnalyzer;
 class SpdifResults final : public AnalyzerResults {
@@ -26,6 +27,7 @@ public:
  void Add(const spdif::Subframe&);
  void Add(const spdif::StatusBlock&);
  void Add(const spdif::Diagnostic&);
+ void Add(const spdif::ContentInfo&);
  void GenerateBubbleText(U64,Channel&,DisplayBase) override;
  void GenerateExportFile(const char*,DisplayBase,U32) override;
  void GenerateFrameTabularText(U64,DisplayBase) override;
@@ -41,6 +43,7 @@ private:
  std::mutex mutex;
  std::vector<spdif::StatusBlock> status_blocks;
  std::vector<spdif::Diagnostic> diagnostics;
+ std::vector<spdif::ContentInfo> content_events;
 };
 class SpdifAnalyzer final : public Analyzer2 {
 public:

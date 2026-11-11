@@ -14,11 +14,101 @@ std::string hex(const std::array<uint8_t,24>& v) {
  std::ostringstream s; s<<std::hex<<std::setfill('0'); for(auto b:v)s<<std::setw(2)<<unsigned(b); return s.str();
 }
 }
+const char* content_name(ContentFormat f) {
+ switch(f){case ContentFormat::Pcm:return "PCM";case ContentFormat::NonPcm:return "Non-PCM (unidentified)";
+ case ContentFormat::Ac3:return "AC-3 (Dolby Digital)";case ContentFormat::Dts1:return "DTS type I";
+ case ContentFormat::Dts2:return "DTS type II";case ContentFormat::Dts3:return "DTS type III";
+ case ContentFormat::Eac3:return "E-AC-3 (Dolby Digital Plus)";case ContentFormat::Null:return "IEC 61937 null";
+ case ContentFormat::Pause:return "IEC 61937 pause";case ContentFormat::Unsupported:return "IEC 61937 unsupported type";
+ case ContentFormat::Provisional:return "Provisional IEC 61937 (status unconfirmed)";
+ case ContentFormat::Conflict:return "Conflict: PCM status / IEC 61937 header";default:return "Unknown";}
+}
 struct Decoder::Impl {
  Config cfg; Sink sink; std::deque<uint64_t> edges;
  bool locked=false, have_pending=false, block=false, finished=false, have_last=false, input_seen=false;
  Subframe pending{}, last{}; unsigned block_count=0; StatusBlock blocks[2];
  uint64_t last_input=0, last_noise_report=0; double half=0;
+ ContentFormat content=ContentFormat::Unknown;
+ int content_mode=-1; std::array<uint8_t,2> known_c0{};
+ unsigned burst_stage=0,remaining_words=0,burst_age=0;
+ ContentInfo burst_info{}; ContentFormat burst_type=ContentFormat::Unknown;
+ bool burst_valid=false;
+ ContentFormat base_content() const {return content_mode==0?ContentFormat::Pcm:content_mode==1?ContentFormat::NonPcm:ContentFormat::Unknown;}
+ void content_event(const ContentInfo& info){if(sink.content)sink.content(info);}
+ void label(ContentFormat next,uint64_t at,const std::string& why) {
+  if(next==content)return;
+  content=next;ContentInfo info;info.start=info.end=at;info.format=next;info.evidence=why;
+  info.integrity=content_mode>=0;content_event(info);
+ }
+ void cancel_burst(uint64_t at,const char* why) {
+  if(burst_stage){burst_info.end=at;burst_info.complete=false;burst_info.integrity=false;
+   burst_info.evidence=why;content_event(burst_info);}
+  burst_stage=remaining_words=0;burst_valid=false;burst_age=0;
+ }
+ void unknown_content(uint64_t at,const char* why) {
+  cancel_burst(at,why);content_mode=-1;label(ContentFormat::Unknown,at,why);
+ }
+ void confirmed_status(uint64_t at) {
+  int mode=-1;
+  if(blocks[0].integrity&&blocks[1].integrity && !(blocks[0].c[0]&0xc1) && !(blocks[1].c[0]&0xc1)
+    && ((blocks[0].c[0]^blocks[1].c[0])&2)==0)mode=(blocks[0].c[0]>>1)&1;
+  if(mode!=content_mode){cancel_burst(at,"Channel status changed");content_mode=mode;label(base_content(),at,"Confirmed complete per-channel consumer status blocks");}
+  known_c0={blocks[0].c[0],blocks[1].c[0]};
+ }
+ ContentFormat burst_label() const {
+  if(content_mode==0)return ContentFormat::Conflict;
+  if(content_mode!=1)return ContentFormat::Provisional;
+  return burst_type;
+ }
+ void burst_word(const Subframe& f) {
+  if(!f.parity_ok){unknown_content(f.start,"Parity damage invalidates content evidence");return;}
+  if(burst_age && ++burst_age>12288){cancel_burst(f.start,"No fresh IEC 61937 header within supported repetition window");label(base_content(),f.start,"Expired IEC 61937 format evidence");}
+  const uint16_t word=uint16_t((f.raw>>8)&0xffff);
+  if(burst_stage==4){
+   if(--remaining_words==0){burst_info.end=f.end;burst_info.complete=true;
+    burst_info.format=burst_label();burst_info.integrity=burst_valid;
+    burst_info.evidence=std::string(content_name(burst_type))+" payload length observed; "+(content_mode==1?"non-audio status corroborates":content_mode==0?"conflicts with PCM status":"channel status unconfirmed");
+    if(!burst_valid)burst_info.evidence+="; Pc error flag is set";
+    content_event(burst_info);
+    label(burst_valid?burst_label():base_content(),f.start,burst_info.evidence);burst_stage=0;
+   }
+   return;
+  }
+  if(burst_stage==1){if(f.channel==1 && word==0x4e1f){burst_stage=2;return;}burst_stage=0;}
+  else if(burst_stage==2){if(f.channel==0){burst_info.pc=word;burst_stage=3;return;}burst_stage=0;}
+  else if(burst_stage==3){
+   if(f.channel!=1){burst_stage=0;return;}
+   burst_info.pd=word;burst_info.end=f.end;burst_info.burst=true;burst_info.complete=false;
+   const unsigned type=burst_info.pc&0x7f;
+   unsigned limit_bits=0;burst_type=ContentFormat::Unsupported;
+   switch(type){case 0:burst_type=ContentFormat::Null;break;case 3:burst_type=ContentFormat::Pause;break;
+    case 1:burst_type=ContentFormat::Ac3;limit_bits=1536*32-64;break;
+    case 11:burst_type=ContentFormat::Dts1;limit_bits=512*32-64;break;
+    case 12:burst_type=ContentFormat::Dts2;limit_bits=1024*32-64;break;
+    case 13:burst_type=ContentFormat::Dts3;limit_bits=2048*32-64;break;
+    case 21:burst_type=ContentFormat::Eac3;limit_bits=6144*32-64;break;}
+   const unsigned bits=type==21?unsigned(word)*8:unsigned(word);
+   burst_valid=(burst_info.pc&0x80)==0;
+   burst_info.format=burst_label();burst_info.integrity=burst_valid;
+   burst_info.evidence=std::string("IEC 61937 header: ")+content_name(burst_type)+"; Pc="+std::to_string(burst_info.pc)+"; stream="+std::to_string(burst_info.pc>>13)+"; payload not yet validated";
+   if(!burst_valid)burst_info.evidence+="; Pc error flag is set";
+   content_event(burst_info);burst_age=1;
+   label(content_mode==0?ContentFormat::Conflict:content_mode==1?ContentFormat::NonPcm:ContentFormat::Provisional,f.start,burst_info.evidence);
+   if(!limit_bits){
+    if(type==0 && word==0){burst_info.complete=true;burst_info.evidence="Null burst with zero payload length";content_event(burst_info);label(burst_label(),f.start,burst_info.evidence);}
+    else if(type==3)label(burst_label(),f.start,"Pause header; type-specific payload interpretation unsupported");
+    else if(type!=0)label(burst_label(),f.start,"Unsupported IEC 61937 type; payload length units not assumed");
+    burst_stage=0;return;
+   }
+   if(!bits || bits>limit_bits){
+    burst_info.integrity=false;burst_info.evidence="Rejected IEC 61937 payload length outside type-specific burst capacity";
+    content_event(burst_info);diag(burst_info.start,f.end,"burst_length",burst_info.evidence);burst_stage=0;return;
+   }
+   remaining_words=(bits+15)/16;burst_stage=4;return;
+  }
+  if(f.channel==0 && word==0xf872){burst_info=ContentInfo{};burst_info.start=f.start;burst_info.burst=true;burst_stage=1;}
+ }
+
  explicit Impl(Config c,Sink s):cfg(c),sink(std::move(s)) {
   if(!std::isfinite(c.capture_rate)||c.capture_rate<=0||!std::isfinite(c.nominal_rate)||c.nominal_rate<0)
    throw std::invalid_argument("capture rate must be positive and nominal rate nonnegative");
@@ -28,6 +118,7 @@ struct Decoder::Impl {
  }
  void partial(uint64_t end,const char* reason) {
   if(!block)return;
+  unknown_content(end,reason);
   for(unsigned ch=0;ch<2;++ch) {
    unsigned count=(block_count+1-ch)/2;
    if(count)diag(blocks[ch].start,end,"incomplete_status",std::string(reason)+" channel="+std::to_string(ch)+" bits="+std::to_string(count)+" C="+hex(blocks[ch].c)+" U="+hex(blocks[ch].u));
@@ -36,7 +127,7 @@ struct Decoder::Impl {
  }
  void lose(uint64_t at,const char* reason) {
   if(locked||have_pending)diag(at,at,"sync_loss",reason);
-  partial(at,reason); locked=false; have_pending=false; have_last=false; half=0;
+  unknown_content(at,reason);partial(at,reason); locked=false; have_pending=false; have_last=false; half=0;
  }
  bool match(double duration,unsigned cells,double t)const {
   // Independent edge quantization contributes up to one capture sample.
@@ -70,6 +161,7 @@ struct Decoder::Impl {
    if(block) {
     if(block_count==384) {
      for(auto &b:blocks){b.end=last.end;b.interpretation=interpret_status(b.c);if(sink.status)sink.status(b);}
+     confirmed_status(f.start);
     } else partial(f.start,"early block preamble");
    }
    block=true;block_count=0;
@@ -85,9 +177,12 @@ struct Decoder::Impl {
     unsigned pos=block_count/2; f.block_position=int(pos); auto& b=blocks[f.channel];
     b.c[pos/8]|=uint8_t(f.status<<(pos%8)); b.u[pos/8]|=uint8_t(f.user<<(pos%8));
     b.integrity &= f.parity_ok; ++block_count;
+    if(content_mode>=0 && pos<8 && f.parity_ok && f.status!=bool((known_c0[f.channel]>>pos)&1))
+     unknown_content(f.start,"Current channel status differs from previous confirmed block");
    }
   }
   if(!f.parity_ok)diag(f.start,f.end,"parity","Even parity failed over slots 4 through 31; payload retained");
+  burst_word(f);f.content=content;
   if(sink.subframe)sink.subframe(f);
   last=f;have_last=true;
  }
@@ -120,6 +215,8 @@ struct Decoder::Impl {
     edges.pop_front();continue;
    }
    size_t i=4; unsigned bit=0; uint32_t raw=0; bool invalid=false;
+   std::array<uint64_t,8> boundaries{};
+   boundaries[0]=edges[0];boundaries[1]=edges[4];
    while(bit<28) {
     if(i+1>=edges.size())return;
     double d=double(edges[i+1]-edges[i]);
@@ -129,11 +226,13 @@ struct Decoder::Impl {
      if(!match(double(edges[i+2]-edges[i+1]),1,t)){invalid=true;break;}
      raw|=uint32_t(1)<<bit;++bit;i+=2;
     } else {invalid=true;break;}
+    if(bit==4)boundaries[2]=edges[i];
+    else if(bit>=24)boundaries[bit-21]=edges[i];
    }
    if(invalid){lose(edges.front(),"Illegal BMC interval; inspect signal or capture sample rate");edges.pop_front();continue;}
    double measured=double(edges[i]-edges.front())/64.;
    if(std::abs(measured/t-1)>.06){lose(edges.front(),"Subframe clock inconsistent with preamble");edges.pop_front();continue;}
-   Subframe f;f.start=edges.front();f.end=edges[i]-1;f.preamble=p;f.channel=(p=='W');f.raw=raw;
+   Subframe f;f.field_boundaries=boundaries;f.start=edges.front();f.end=edges[i]-1;f.preamble=p;f.channel=(p=='W');f.raw=raw;
    uint32_t payload=raw&0xffffff;f.sample=int32_t(payload);if(payload&0x800000)f.sample-=0x1000000;
    f.validity=bool(raw&(1u<<24));f.user=bool(raw&(1u<<25));f.status=bool(raw&(1u<<26));f.parity=bool(raw&(1u<<27));
    f.parity_ok=(ones(raw)%2)==0;f.sample_rate=cfg.capture_rate/(128*measured);
@@ -156,6 +255,7 @@ struct Decoder::Impl {
   if(finished)return;
   if(input_seen && end<last_input)throw std::invalid_argument("capture end precedes last edge");
   process();
+  cancel_burst(end,"Capture ended before IEC 61937 burst completed");
   partial(end,"capture ended before confirming block boundary");
   if(edges.size()>1 || have_pending)diag(edges.front(),end,"truncated","Capture ends with an incomplete or unconfirmed subframe");
   finished=true;

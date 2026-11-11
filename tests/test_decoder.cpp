@@ -1,4 +1,5 @@
 #include "Fixtures.h"
+#include "ContentTests.h"
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -51,5 +52,24 @@ static void recovery_and_blocks(){
 }
 static void interpretation(){std::array<uint8_t,24>b{};for(unsigned maximum:{0u,1u})for(unsigned code:{1u,2u,4u,5u,6u}){b[4]=uint8_t(maximum|(code<<1));unsigned m=maximum?24:20;unsigned bits=code==1?m-4:code==2?m-2:code==4?m-1:code==5?m:m-3;check(spdif::interpret_status(b).find("word_length="+std::to_string(bits))!=std::string::npos,"declared word length");}b[0]=1;check(spdif::interpret_status(b).find("professional")!=std::string::npos,"professional label");b[0]=2;check(spdif::interpret_status(b).find("non-audio")!=std::string::npos,"non-audio label");b[0]=0;b[3]=15;check(spdif::interpret_status(b).find("unknown(15)")!=std::string::npos,"unknown frequency retained");}
 static void large_timestamps(){Signal s(100000000,48000);s.frames(8);uint64_t offset=uint64_t(1)<<54;for(auto&e:s.edges)e+=offset;for(auto&e:s.expected)e.start+=offset;exact(s,decode(s));}
+static void field_boundaries(){
+ // These checks consume timestamps recorded by the encoder at field boundary
+ // transitions; they never reconstruct expected timestamps from decoder output.
+ for(double rate:{8000.,48000.,192000.})for(double oversample:{8.,8.17})for(double jitter:{0.,.1}){
+  Signal s(rate*128*oversample,rate);s.jitter=jitter;s.frames(12);
+  auto result=decode(s);check(result.frames.size()==s.expected.size()-1,"field fixture complete subframes");
+  for(const auto& f:result.frames){auto expected=std::find_if(s.expected.begin(),s.expected.end(),[&](const Expected&e){return e.start==f.start;});
+   check(expected!=s.expected.end(),"field fixture frame identity");
+   check(f.field_boundaries==expected->field_boundaries,"exact measured field boundaries");
+   check(f.field_boundaries[0]==f.start,"preamble boundary equals frame start");
+   check(f.field_boundaries[7]==f.end+1,"P end exclusive equals frame end plus one");
+   for(unsigned i=1;i<8;++i)check(f.field_boundaries[i]>f.field_boundaries[i-1],"field boundaries strictly increasing");
+  }
+ }
+ // Hand-written timing oracle at eight capture samples per half cell.
+ Signal literal(49152000,48000);literal.frames(4);auto r=decode(literal);
+ const unsigned offsets[]={0,8,16,56,58,60,62,64};
+ for(const auto& f:r.frames)for(unsigned i=0;i<8;++i)check(f.field_boundaries[i]==f.start+8*offsets[i],"literal field slot timing");
+}
 static void random_faults(){std::mt19937 rng(0x958);Signal s(100000000,48000);s.frames(30);for(unsigned n=0;n<50;++n){auto bad=s;size_t k=1+rng()%(bad.edges.size()-2);bad.edges.erase(bad.edges.begin()+k);auto a=decode(bad),b=decode(bad);check(a.frames.size()==b.frames.size(),"fault determinism count");check(a.diagnostics.size()==b.diagnostics.size(),"diagnostic determinism");for(size_t i=0;i<a.frames.size();++i)check(a.frames[i].raw==b.frames[i].raw&&a.frames[i].start==b.frames[i].start,"deterministic event");}}
-int main(){try{literal_vectors();clean_rates();extrema_and_flags();jitter();status();faults();recovery_and_blocks();interpretation();large_timestamps();random_faults();std::cout<<"PASS "<<checks<<" checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL after "<<checks<<": "<<e.what()<<"\n";return 1;}}
+int main(){try{literal_vectors();clean_rates();extrema_and_flags();jitter();status();faults();recovery_and_blocks();interpretation();large_timestamps();field_boundaries();random_faults();content_tests(check);std::cout<<"PASS "<<checks<<" checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL after "<<checks<<": "<<e.what()<<"\n";return 1;}}

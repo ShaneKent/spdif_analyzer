@@ -11,6 +11,7 @@ void SpdifAnalyzer::WorkerThread(){
  spdif::Sink sink;
  sink.subframe=[this](const spdif::Subframe& f){ results->Add(f); results->CommitResults(); };
  sink.status=[this](const spdif::StatusBlock& b){ results->Add(b); results->CommitResults(); };
+ sink.content=[this](const spdif::ContentInfo& c){ results->Add(c); results->CommitResults(); };
  sink.diagnostic=[this](const spdif::Diagnostic& d){ results->Add(d); results->CommitResults(); };
  if(settings.nominal && GetSampleRate()<settings.nominal*512u)
   results->Add(spdif::Diagnostic{0,0,"capture_rate_low","Capture rate is below four samples per half-cell for the manual nominal rate; increase the capture rate."});
