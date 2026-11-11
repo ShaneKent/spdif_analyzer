@@ -56,3 +56,4 @@ endif()
 
 add_executable(decode_edges tools/decode_edges.cpp)
 target_link_libraries(decode_edges PRIVATE spdif_core)
+

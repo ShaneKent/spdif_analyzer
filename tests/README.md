@@ -29,7 +29,7 @@ For memory/undefined behavior checks, compile the test executable with `-fsaniti
 
 ## Initial local results (2026-11-11)
 
-The Linux `g++ -O2` suite passed 131,997 checks. The one-minute counting-sink benchmark processed 1,025,280,036 edges and emitted 23,039,999 subframes in 145.87 seconds (0.411 capture seconds per wall second). One final subframe lacks its closing boundary edge; the three diagnostics are two unconfirmed status blocks and the truncated ending. This is a local sandbox measurement, not a Windows or Logic 2 throughput claim.
+The Linux `g++ -O2` suite passed 131,997 checks. After field annotations and content identification were integrated, the one-minute counting-sink benchmark processed 1,025,280,036 edges and emitted 23,039,999 subframes in 150.205 seconds (0.399454 capture seconds per wall second). One final subframe lacks its closing boundary edge; the three diagnostics are two unconfirmed status blocks and the truncated ending. This is a local sandbox measurement, not a Windows or Logic 2 throughput claim.
 
 
 `ContentTests.h` independently exercises IEC 61937 header identification for AC-3 and DTS types I/II/III, E-AC-3 byte-count lengths, unknown extended types, null/pause, Pc error bit 7 versus valid AC-3 type-dependent bit 8, parity corruption, zero/oversized/odd/truncated lengths, status conflicts, channel order, format change, gap reset, parity invalidation of stale PCM, and stale-burst expiry. Expected formats are checked on both structured events and subsequent subframes. The payload words are synthetic transport fixtures: complete payload extent and header evidence are verified; codec syntax, CRC, decompression, and valid audible output are not.

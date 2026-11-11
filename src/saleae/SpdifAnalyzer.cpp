@@ -9,17 +9,23 @@ void SpdifAnalyzer::SetupResults(){ results.reset(new SpdifResults(this,&setting
 void SpdifAnalyzer::WorkerThread(){
  auto* input=GetAnalyzerChannelData(settings.channel);
  spdif::Sink sink;
- sink.subframe=[this](const spdif::Subframe& f){ results->Add(f); results->CommitResults(); };
- sink.status=[this](const spdif::StatusBlock& b){ results->Add(b); results->CommitResults(); };
- sink.content=[this](const spdif::ContentInfo& c){ results->Add(c); results->CommitResults(); };
- sink.diagnostic=[this](const spdif::Diagnostic& d){ results->Add(d); results->CommitResults(); };
+ sink.subframe=[this](const spdif::Subframe& f){ results->Add(f); };
+ sink.status=[this](const spdif::StatusBlock& b){ results->Add(b); };
+ sink.content=[this](const spdif::ContentInfo& c){ results->Add(c); };
+ sink.diagnostic=[this](const spdif::Diagnostic& d){ results->Add(d); };
  if(settings.nominal && GetSampleRate()<settings.nominal*512u)
   results->Add(spdif::Diagnostic{0,0,"capture_rate_low","Capture rate is below four samples per half-cell for the manual nominal rate; increase the capture rate."});
  results->CommitResults();
  spdif::Decoder decoder({double(GetSampleRate()),double(settings.nominal)},std::move(sink));
  U64 edges=0;
  for(;;){
-  CheckIfThreadShouldExit(); input->AdvanceToNextEdge(); decoder.edge(input->GetSampleNumber());
+  CheckIfThreadShouldExit();
+  // Commit a short tail before an edge wait, including temporary live idle.
+  // Do not terminate the decoder when the currently buffered data is empty.
+  if(!input->DoMoreTransitionsExistInCurrentData()){
+   results->CommitResults();ReportProgress(input->GetSampleNumber());
+  }
+  input->AdvanceToNextEdge(); decoder.edge(input->GetSampleNumber());
   if((++edges&1023)==0){ results->CommitResults(); ReportProgress(input->GetSampleNumber()); }
  }
 }

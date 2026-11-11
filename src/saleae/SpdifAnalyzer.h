@@ -8,7 +8,7 @@
 
 class SpdifSettings final : public AnalyzerSettings {
 public:
- Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0; int detail=0;
+ Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0; int detail=0; int csv_export=0;
  SpdifSettings();
  bool SetSettingsFromInterfaces() override;
  void LoadSettings(const char*) override;
@@ -19,6 +19,7 @@ private:
  AnalyzerSettingInterfaceInteger rate_ui;
  AnalyzerSettingInterfaceNumberList display_ui;
  AnalyzerSettingInterfaceNumberList detail_ui;
+ AnalyzerSettingInterfaceNumberList export_ui;
 };
 class SpdifAnalyzer;
 class SpdifResults final : public AnalyzerResults {

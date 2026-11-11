@@ -67,41 +67,56 @@ void SpdifResults::Add(const spdif::ContentInfo& c){
  if(pending.size()<7)pending.push_back({ContentType,content_events.size()-1});else ++suppressed_notifications;
 }
 U64 SpdifResults::PublishPending(const spdif::Subframe& s){
- // Legacy bubbles contain only subframes. Structured notifications use a short
+ // Legacy bubbles contain only sample fields (or compact subframes). Structured notifications use a short
  // prefix of the next subframe, never overlapping another FrameV2. Their true
  // coverage remains in named fields and the metadata CSV exports.
  U64 cursor=s.start;
- std::lock_guard<std::mutex> lock(mutex);
- for(const auto& event:pending){
+ struct Copy { U8 type; spdif::StatusBlock status; spdif::Diagnostic diagnostic; spdif::ContentInfo content; };
+ std::vector<Copy> notifications;
+ U64 suppressed=0;
+ {
+  std::lock_guard<std::mutex> lock(mutex);
+  notifications.reserve(pending.size());
+  for(const auto& event:pending){
+   Copy copy;copy.type=event.type;
+   if(event.type==StatusType)copy.status=status_blocks.at(event.index);
+   else if(event.type==ContentType)copy.content=content_events.at(event.index);
+   else copy.diagnostic=diagnostics.at(event.index);
+   notifications.push_back(std::move(copy));
+  }
+  pending.clear();suppressed=suppressed_notifications;suppressed_notifications=0;
+ }
+ // No calls into Saleae while holding the metadata mutex: export runs on a
+ // separate SDK thread and can otherwise invert metadata/SDK lock ordering.
+ for(const auto& event:notifications){
   FrameV2 v;
   if(event.type==StatusType){
-   const auto& b=status_blocks.at(event.index);
+   const auto& b=event.status;
    v.AddString("channel",b.channel?"B / right":"A / left");
    v.AddByteArray("C",b.c.data(),b.c.size());v.AddByteArray("U",b.u.data(),b.u.size());
    v.AddInteger("coverage_start_sample",b.start);v.AddInteger("coverage_end_sample",b.end);
    v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddString("interpretation",b.interpretation.c_str());
    AddFrameV2(v,"channel_status",cursor,cursor);
   }else if(event.type==ContentType){
-   const auto& c=content_events.at(event.index);
+   const auto& c=event.content;
    v.AddInteger("coverage_start_sample",c.start);v.AddInteger("coverage_end_sample",c.end);
    v.AddString("format",spdif::content_name(c.format));v.AddString("evidence",c.evidence.c_str());
    v.AddInteger("Pc",c.pc);v.AddInteger("Pd",c.pd);v.AddBoolean("burst",c.burst);
    v.AddBoolean("complete",c.complete);v.AddBoolean("integrity",c.integrity);
    AddFrameV2(v,"content",cursor,cursor);
   }else{
-   const auto& d=diagnostics.at(event.index);
+   const auto& d=event.diagnostic;
    v.AddInteger("coverage_start_sample",d.start);v.AddInteger("coverage_end_sample",d.end);
    v.AddString("code",d.code.c_str());v.AddString("message",d.message.c_str());
    AddFrameV2(v,"diagnostic",cursor,cursor);AddMarker(cursor,ErrorX,settings->channel);
   }
   ++cursor;
  }
- if(suppressed_notifications){
-  FrameV2 v;v.AddString("code","notification_summary");v.AddInteger("count",suppressed_notifications);
+ if(suppressed){
+  FrameV2 v;v.AddString("code","notification_summary");v.AddInteger("count",suppressed);
   v.AddString("message","Additional notifications omitted from waveform table; original events remain available in metadata CSV exports.");
   AddFrameV2(v,"diagnostic",cursor,cursor);++cursor;
  }
- pending.clear();suppressed_notifications=0;
  return cursor;
 }
 std::string SpdifResults::Text(const Frame& f){
@@ -148,6 +163,9 @@ void SpdifResults::GenerateFrameTabularText(U64 index,DisplayBase){ClearTabularT
 void SpdifResults::GeneratePacketTabularText(U64,DisplayBase){ClearTabularText();}
 void SpdifResults::GenerateTransactionTabularText(U64,DisplayBase){ClearTabularText();}
 void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 type){
+ // Logic's Automation API exposes only the generic (id 0) export command.
+ // Explicit non-default SDK export commands retain their named format.
+ if(type==0)type=static_cast<U32>(settings->csv_export);
  std::ofstream out(name,std::ios::binary);if(!out)return;out.imbue(std::locale::classic());out<<std::setprecision(12);
  if(type==0)out<<"start_seconds,end_seconds,channel,preamble,block_position,raw_slots_4_31,payload_hex,signed_container_24,main_field_raw,auxiliary,V_invalid,U,C,P,parity_ok,measured_sample_rate_hz,sample_meaning,content\n";
  else if(type==1)out<<"start_seconds,end_seconds,channel,complete,integrity,C_bytes_earliest_first,U_bytes_earliest_first,interpretation\n";
@@ -156,7 +174,8 @@ void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 type){
  const auto trigger=analyzer->GetTriggerSample();const auto rate=analyzer->GetSampleRate();
  const auto time=[=](S64 sample){return (double(sample)-double(trigger))/rate;};
  U64 total=0;
- {std::lock_guard<std::mutex> lock(mutex);total=type==0?GetNumFrames():type==1?status_blocks.size():type==2?diagnostics.size():content_events.size();}
+ if(type==0)total=GetNumFrames();
+ else {std::lock_guard<std::mutex> lock(mutex);total=type==1?status_blocks.size():type==2?diagnostics.size():content_events.size();}
  for(U64 i=0;i<total;++i){
   if(UpdateExportProgressAndCheckForCancel(i,total))break;
   if(type==0){
