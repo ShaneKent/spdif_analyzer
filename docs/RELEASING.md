@@ -2,15 +2,21 @@
 
 Release packages contain one production S/PDIF analyzer and an explicit set of public documents. They exclude the test signal plugin, SDK runtimes, captures, credentials, source checkout metadata, and local planning files. `PACKAGE.json` identifies the centralized version, source commit, pinned AnalyzerSDK revision, binary-derived platform/architecture, minimum Logic version, and runtime/loading limitations. `SHA256SUMS.txt` covers every other archive member; the adjacent `.zip.sha256` covers the whole ZIP. Hashes detect corruption, not publisher identity or code signing.
 
+Maintainers update these highlights and the linked feature/validation documents before tagging. The workflow includes this section in generated release notes.
+
 ## Release highlights
 
 - Inspect bounded AC-3, E-AC-3 and DTS frame headers and distinguish transport integrity, codec structure, and supported CRC results. Compressed audio is preserved; it is not decompressed.
 - Check professional channel-status CRCC separately from parity and format reliability.
 - Compare delay across time windows with explicit gaps, uncertainty and informational drift; generate standalone interactive capture reports from existing exports.
 - Exercise malformed inputs with bounded sanitizer fuzz targets and measure the shared pipeline with reproducible workload/cancellation reports.
+- Add an explicit sparse-table option that keeps waveform annotations and full CSV samples while reducing dense structured-result ingestion.
 - Deliver verified Windows, Linux and macOS production packages through a staged release workflow.
 
-Maintainers update these highlights and the linked feature/validation documents before tagging. The workflow includes this section in generated release notes.
+Physical AC-3/DTS payloads were checked against independent sources. Conflicting PCM status remains rejected. Physical unplug/reconnect and reacquisition remain unverified; closing and reopening playback is not carrier-loss evidence. Audio decompression and DTS full-frame CRC verification remain outside scope.
+
+Packages require Logic 2.3.43 or later and identify their exact source/SDK revisions and binary architecture. They are unsigned and not notarized. Windows Logic loading is tested; Linux/macOS GUI loading is not established by CI. Installation, validation and physical-source limitations are documented with the packages.
+
 
 ## Local packaging and verification
 

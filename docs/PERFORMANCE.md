@@ -74,6 +74,32 @@ All four CSV files have SHA-256 `15ed0e8285e03507952f989332c5837f7ecfb8fc5fad66e
 
 Logic's launch PID does not account for its backend child. A read-only snapshot during a full-table run found approximately 1.585 GB working set and 2.053 GB private usage counter in the busy backend, while the launch process used approximately 149 MB. Those are point observations, not concurrent tree peaks. Early local probe reports are explicitly labeled launch-PID-only and must not be read as total Logic memory. Backend log database-completion timestamps match the long add-analyzer interval. Full-table long recordings can therefore consume substantial time and memory even when the portable decoder is fast.
 
+### Native rate, fault and longer-recording matrix
+
+Independent QA recordings at 250 MS/s supplied approximately 0.134 seconds of PCM at each physical audio rate. Both modes used the explicit sparse table and a 10 ms analysis window. Actual decoded stereo ramps, parity, rates, source intervals and mode-identical CSV hashes were checked; add-analyzer and export requests were timed separately.
+
+| Source | Subframes | Samples setup | Fields setup | Samples / Fields CSV export |
+|---|---:|---:|---:|---:|
+| 48 kHz | 12,884 | 1.987 s | 1.843 s | 0.306 / 0.308 s |
+| 96 kHz | 25,769 | 2.789 s | 3.090 s | 0.484 / 0.599 s |
+| 192 kHz | 51,539 | 4.891 s | 4.894 s | 0.797 / 0.799 s |
+
+The reused process tree was warm: sampled concurrent private usage across this matrix ranged roughly 1.5–2.0 GiB, including retained heaps and caches from previous cases. These values are not per-case allocation deltas or decoder memory. Input loading, table export, removal and capture close are separate fields in the local measurement reports. A 250 ms sampler can miss shorter peaks.
+
+Four additional native fixture pairs exercised literal professional CRCC examples (82 passed records per mode), CRCC-only faults (34 passed, 16 failed, 16 CRC diagnostics and zero parity failures), gaps plus parity faults (7 synchronization losses and 7 parity failures), and 48↔96 kHz changes with reacquisition. All 14 cases passed, with exact paired CSV hashes. Content transitions additionally have real-source evidence in [HARDWARE.md](HARDWARE.md).
+
+A requested five-second demo fixture contained an unexpected quiet tail: raw export spanned 5.066719232 s but its last transition was at 2.68435424 s. It was rejected as evidence of five seconds of continuous data. The cutoff cause remains unknown; no Saleae limit or decoder defect is inferred. The native long-recording measurement instead uses a fresh passive physical D6/D7 capture, after confirming 48 kHz PCM and preserving source settings and the user's original Logic session.
+
+The physical recording contains 5.04692736 s of continuous transitions at 100 MS/s. Both waveform modes decoded **484,515 subframes** over 5.04692129 s with zero parity errors, mean transport rate near 48 kHz, and identical CSV SHA-256 `d77d67b538d16777aa4c223657233393a2f10bd47cfabc5975c5d69dba61f5ee`. Samples setup/export took 34.340/9.298 s; Fields took 32.167/8.299 s. Sampled concurrent process-tree private peaks were 1,425,911,808/1,571,319,808 bytes respectively; working-set sums were 1,133,539,328/1,322,991,616 bytes. Export, table output and cleanup are included in the separate 44.670/41.603 s measured intervals; signal generation/acquisition is excluded.
+
+Those runs used a sampled 4 GiB tree-private limit, 2 GiB minimum available system RAM and a 120 s per-stage wall budget. No guard fired. The guard requests closure of only its owned capture; it is an advisory sampled stop condition, not an operating-system memory quota. Full dense tables were not extrapolated into this long run because their measured short-recording ingestion cost was already substantial. Full-table and sparse-table results are labelled separately.
+
+### Native export interruption
+
+The five-second physical recording also exercised an interrupted native CSV bundle export. Closing only its owned capture after export began left `INCOMPLETE`, `complete:false` and `state:cancelled`, with 7,693 of 484,515 sample rows written. The interrupted file is a byte-exact prefix of the complete export. The backend log records the native export thread ending 193 ms after it started, 69 ms after capture deletion. A fresh analyzer then decoded and exported the independent 48 kHz fixture successfully with its expected CSV hash, establishing continued plugin use.
+
+The synchronous legacy-export API request remained pending for more than 60 seconds after that capture-close operation. The helper timed out; this is not a clean API-completion result. File-generation cancellation and usable subsequent analysis are established separately from that application/API limitation. Keep a capture open during ordinary synchronous automation exports; cancellation must be assessed from the explicit manifest/marker state rather than a client request disappearing. A cancelled gRPC future alone would not prove that native work stopped.
+
 ## Regression policy
 
 Use `--compare previous/report.json` for an advisory comparison. Add `--enforce` only on a controlled host with the same build label, capture settings, filesystem device, and at least three repetitions. The executable hash may differ because a code change is being measured. Output checksum and subframe counts must match before speed is compared. A changed result is a correctness failure, not an optimization.

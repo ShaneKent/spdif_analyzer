@@ -38,7 +38,7 @@ Type constants and E-AC-3 length units were independently checked against the FF
 
 ## Feature suites
 
-`test_protocol_features.cpp` uses literal professional word-length vectors and explicit transport-frame burst spacings. Professional interpretation follows ALSA definitions and [Cirrus AN22 Tables 2–3](https://statics.cirrus.com/pubs/appNote/an22.pdf); byte 22 bit 4 expressly disclaims audio-format fields, while the other region flags do not. Incoming reliability changes invalidate evidence immediately; address/CRC changes preserve unchanged format evidence. CRC computation remains outside the current scope.
+`test_protocol_features.cpp` uses literal professional word-length vectors and explicit transport-frame burst spacings. Professional interpretation follows ALSA definitions and [Cirrus AN22 Tables 2–3](https://statics.cirrus.com/pubs/appNote/an22.pdf); byte 22 bit 4 expressly disclaims audio-format fields, while the other region flags do not. Incoming reliability changes invalidate evidence immediately; address/CRC changes preserve unchanged format evidence. Professional CRCC is now covered by independent Annex B vectors and trust/recovery checks in `test_status_crc.cpp`; a valid address/CRC change preserves unchanged format evidence, while a proven bad CRCC clears trust.
 
 `test_analysis.cpp` checks per-channel coverage/faults, trusted status transitions, and independent PCM aggregates, including raw validity flags, mixed accepted/excluded windows, unknown precision, huge timestamps, gaps, rate/layout changes, and explicit professional field unreliability. `test_exports.cpp` checks WAV bytes/layouts and segmentation, burst bytes/partial words/rejection, bundle snapshot cursors/cancellation/failure, and non-default global locales.
 

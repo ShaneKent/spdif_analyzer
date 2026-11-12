@@ -36,6 +36,8 @@ Keep **Export output → Selected CSV** for that workflow. Other choices export 
 
 **Analysis window (ms)** controls health and PCM windows. **PCM bits override** defaults to zero (use the declared effective precision); choose 16–24 only to resolve unspecified precision explicitly. It never overrides known precision or bypasses PCM, validity or parity gates. WAV additionally offers **WAV rate override (Hz)** and **Assume A/B stereo**. The latter is needed when interpreting professional independent channels as a stereo pair. Neither option resamples or decodes compressed audio.
 
+During synchronous automation exports, keep the capture open until the export finishes. In a Logic 2.4.48 interruption check, closing a capture correctly left a cancelled, incomplete bundle but its API request remained pending; see the [measured cancellation limitation](PERFORMANCE.md#native-export-interruption).
+
 Directory exports append `.wav-export`, `.bursts`, or `.bundle` to the requested filename. Choose a new destination for each request: existing directories are rejected. Read the index/manifest and check that `INCOMPLETE` is absent. A failure also creates a separate `<requested-filename>.error.json`; the SDK has no dedicated export-error setter. See [feature and format definitions](FEATURES.md) before treating exported files as audio.
 
 The native lifecycle harness is `build-win/Release/smoke_windows.exe`; it expects the plugin path as its argument and the SDK runtime in its executable directory or DLL search path. It verifies loading and settings, while field annotations require Logic's host initialization.
