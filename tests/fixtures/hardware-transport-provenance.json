@@ -26,6 +26,15 @@
     "cross_path_check": "Raw upper16 payload words were independently collected at literal F872/4E1F/Pc/Pd headers; complete D6 and D7 payload arrays were byte identical in order",
     "regression_payload": "New deterministic words 0x4000 | ((word_index * 73 + Pc * 29) & 0x3fff); these are not captured audio or claimed valid compressed codec frames"
   },
+  "synthetic_loss_recovery": {
+    "physical_unplug_performed": false,
+    "source": "New deterministic fixture::Signal transitions, not captured edges or compressed media",
+    "scenarios": 8,
+    "matrix": "AC3 and DTS type I; both signal polarities; prior non-audio or prior PCM declaration changing to non-audio after return",
+    "interruption": "Cut inside an IEC payload word and an unfinished BMC subframe; resume 37 stereo frames later, mid-subframe and mid-block, with exactly 200 ms between adjacent retained edges",
+    "assertions": "Interrupted burst is incomplete with exactly 17 whole payload words; no emitted subframe, complete status block or trusted payload spans the gap; both fresh channel-status blocks precede trusted compressed classification; 48 kHz timing/parity and two later deterministic payloads recover; stale PCM and codec trust clear; quiet EOF at the same cut cannot complete the burst",
+    "limitation": "Synthetic loss/recovery verifies software behavior and does not establish physical optical receiver or cable reconnect behavior"
+  },
   "limitations": [
     "The deterministic regression is derived synthetic transport evidence, not a recording replay or independent codec validation",
     "Steady captures do not establish PCM/compressed transitions, gaps, physical reconnect or reacquisition",

@@ -53,10 +53,22 @@ Independent checks found all six accepted AC3 payloads source-exact and independ
 
 That malformed tail retained valid subframe parity, a complete declared transport length, and a valid inspected DTS common header and physical extent. The analyzer therefore reports the checked header/extent structure as passed while leaving DTS full-frame CRC **unsupported**. It does not claim that the compressed body decoded successfully. The tail was observed around source close/reopen; this evidence does not isolate the responsible driver, device or component. Transport-complete extraction remains distinct from codec-body validity, as the [codec matrix](CODECS.md) specifies.
 
-Neither recorded path had an edge gap over 20 microseconds during those source operations. Source close/reopen therefore **did not demonstrate physical carrier loss, cable reconnect or decoder reacquisition**. Deliberate unplug/reconnect remains a separate pending physical check.
+Neither recorded path had an edge gap over 20 microseconds during those source operations. Source close/reopen therefore **did not demonstrate physical carrier loss, cable reconnect or decoder reacquisition**. Physical cable removal remains untested. Decoder loss/recovery is covered separately by the simulated cases below.
 
-## Remaining physical evidence
+## Simulated signal loss and reacquisition
+
+Loss/recovery validation uses explicitly artificial gaps. Physical AC3/DTS source authenticity is established by the recordings above; these simulations do not establish optical receiver or cable behavior.
+
+The private recorded-stream replay removes 2 ms from inside a codec payload and resumes midstream after exactly 200 ms between retained edges. All remaining transition intervals, payload bytes and captured jitter are preserved. Four cases cover AC3/DTS on D6/D7. The interrupted burst remains incomplete, no decoded subframe, complete status block or complete payload bridges the missing interval, and both fresh channel-status blocks are required before trusted classification resumes. Explicit provisional header evidence remains permitted while status is unconfirmed.
+
+After recovery, D6 supplied three accepted AC3 payloads and seven DTS payloads. Each matched an independent source frame byte for byte and independently decoded with FFmpeg CRC checking. D7 continued to expose its PCM-status contradiction and accepted zero payloads. These are replay results with an injected gap, not new hardware captures; private media and edges remain excluded from the repository.
+
+The public deterministic regression adds eight gap scenarios: AC3/DTS, both signal polarities, and prior PCM/non-audio declarations. Each interrupts an unfinished BMC word inside the second IEC payload, resumes 37 stereo frames later inside a status block, and inserts an exact 200 ms edge gap. Checks establish the exact 17-word interrupted prefix, rejection of unfinished bursts, unchanged retained source data, fresh status on both channels, recovery within eight subframes, and two later byte-exact deterministic payloads. A capture ending at the same cut remains incomplete. The generated payloads exercise transport rather than claiming codec-valid audio.
+
+Strict and ASan/UBSan runs pass 2,313,061 hardware-derived and synthetic checks. Local LeakSanitizer cannot run under the traced sandbox; that limitation is not counted as a leak-check pass.
+
+## Physical-test limitations
 
 No EAC3 recording is established. A read-only direct WinMM capability query tested IEC 61937 EAC3 subformat `0000000a-0cea-0010-8000-00aa00389b71` at a 192 kHz, 16-bit stereo carrier, with both 40-byte and 52-byte format descriptions. Both returned error 32 (`WAVERR_BADFORMAT`) for the selected Windows S/PDIF endpoint. This limits that endpoint/query combination; it does not prove EAC3 unavailable through every API, device or configuration.
 
-Physical signal gaps, unplug/reconnect and reacquisition still need separately recorded and checked evidence. Keep the broader physical-validation work open for these cases. The generated public regression is transport evidence derived from steady observations, not a replay of the transition recording. Automatic control of source playback, device wiring and Logic acquisition is outside the regression test.
+Physical unplug/reconnect remains untested. The accepted decoder gap/reacquisition check is simulated, while the required AC3/DTS source and format-transition checks use physical recordings. This distinction is preserved in the issue acceptance record. No connector action is inferred from a source-close operation or an artificial edge gap.
