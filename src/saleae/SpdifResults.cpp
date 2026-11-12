@@ -1,4 +1,5 @@
 #include "SpdifAnalyzer.h"
+#include "report/Events.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -7,21 +8,18 @@
 #include <sstream>
 namespace {
 constexpr U8 PreambleType=0,AuxType=1,MainType=2,VType=3,UType=4,CType=5,PType=6,SampleType=7;
-constexpr U8 StatusType=1,DiagnosticType=2,ContentType=3;
+constexpr U8 StatusType=1,DiagnosticType=2,ContentType=3,HealthType=4,ChangeType=5,PcmType=6;
 std::string hex(uint64_t value,int width){ std::ostringstream s; s<<"0x"<<std::uppercase<<std::hex<<std::setw(width)<<std::setfill('0')<<value; return s.str(); }
-std::string bytes(const std::array<uint8_t,24>& a){ std::ostringstream s; for(auto v:a)s<<std::hex<<std::uppercase<<std::setw(2)<<std::setfill('0')<<unsigned(v); return s.str(); }
-std::string csv(const std::string& value){ std::string out="\""; for(char c:value){if(c=='"')out+='"';out+=c;}return out+'"'; }
 int32_t signed_sample(uint32_t raw){ const auto p=raw&0xffffff;return (p&0x800000)?int32_t(p)-0x1000000:int32_t(p); }
 char preamble(const Frame& f){return char(f.mData2&255);}
 unsigned channel(const Frame& f){return preamble(f)=='W'?1:0;}
-int position(const Frame& f){return int((f.mData2>>8)&511)-1;}
-double measured(const Frame& f){return double(f.mData2>>17)/1000.0;}
 bool parity_ok(uint32_t raw){unsigned n=0;for(unsigned i=0;i<28;++i)n+=(raw>>i)&1;return (n&1)==0;}
 Frame frame(U8 type,uint64_t start,uint64_t end){Frame f;f.mType=type;f.mFlags=0;f.mData1=0;f.mData2=0;f.mStartingSampleInclusive=start;f.mEndingSampleInclusive=std::max(start,end);return f;}
 }
 SpdifResults::SpdifResults(SpdifAnalyzer* a,SpdifSettings* s):analyzer(a),settings(s){}
 void SpdifResults::Add(const spdif::Subframe& s){
- auto f=frame(SampleType,s.start,s.end); f.mData1=uint64_t(s.raw)|(uint64_t(s.content)<<32);
+ last_decoded_end=s.end;
+ auto f=frame(SampleType,s.start,s.end); f.mData1=uint64_t(s.raw)|(uint64_t(s.content)<<32)|(uint64_t(s.layout.bits&31)<<40)|(uint64_t(s.layout.known)<<45)|(uint64_t(s.layout.stereo)<<46)|(uint64_t(s.layout.professional)<<47);
  f.mData2=uint64_t(s.preamble)|(uint64_t(s.block_position+1)<<8)|(uint64_t(std::llround(s.sample_rate*1000))<<17);
  if(!s.parity_ok)f.mFlags|=DISPLAY_AS_ERROR_FLAG;
  else if(s.validity)f.mFlags|=DISPLAY_AS_WARNING_FLAG;
@@ -33,13 +31,13 @@ void SpdifResults::Add(const spdif::Subframe& s){
    part.mFlags=0;
    if(field==PType && !s.parity_ok)part.mFlags=DISPLAY_AS_ERROR_FLAG;
    if(field==VType && s.validity)part.mFlags=DISPLAY_AS_WARNING_FLAG;
-   AddFrame(part);
+   AddFrame(part);++legacy_frames_written;
   }
- }else AddFrame(f);
+ }else {AddFrame(f);++legacy_frames_written;}
  const U64 v2_start=PublishPending(s);
- FrameV2 v;const char p[]={s.preamble,0};v.AddString("channel",s.channel?"B / right":"A / left");v.AddString("preamble",p);
+ FrameV2 v;const char p[]={s.preamble,0};v.AddString("channel",s.layout.stereo?(s.channel?"B / right":"A / left"):(s.channel?"B":"A"));v.AddString("preamble",p);
  v.AddInteger("raw_slots_4_31",s.raw);v.AddString("payload_hex",hex(s.raw&0xffffff,6).c_str());
- v.AddString("content",spdif::content_name(s.content));
+ v.AddString("content",spdif::content_name(s.content));v.AddInteger("layout_bits",s.layout.bits);v.AddBoolean("layout_known",s.layout.known);v.AddBoolean("layout_stereo",s.layout.stereo);v.AddBoolean("layout_professional",s.layout.professional);
  v.AddInteger("signed_container_24",s.sample);v.AddByte("auxiliary",s.raw&15);
  v.AddInteger("main_field_raw",(s.raw>>4)&0xfffff);
  v.AddBoolean("V_invalid",s.validity);v.AddBoolean("U",s.user);v.AddBoolean("C",s.status);v.AddBoolean("P",s.parity);v.AddBoolean("parity_ok",s.parity_ok);
@@ -53,25 +51,40 @@ void SpdifResults::Add(const spdif::Subframe& s){
 }
 void SpdifResults::Add(const spdif::StatusBlock& b){
  std::lock_guard<std::mutex> lock(mutex);
- status_blocks.push_back(b);
+ metadata_end=std::max(metadata_end,U64(b.end));status_blocks.push_back(b);
  if(pending.size()<7)pending.push_back({StatusType,status_blocks.size()-1});else ++suppressed_notifications;
 }
 void SpdifResults::Add(const spdif::Diagnostic& d){
  std::lock_guard<std::mutex> lock(mutex);
- diagnostics.push_back(d);
+ metadata_end=std::max(metadata_end,U64(d.end));diagnostics.push_back(d);
  if(pending.size()<7)pending.push_back({DiagnosticType,diagnostics.size()-1});else ++suppressed_notifications;
 }
 void SpdifResults::Add(const spdif::ContentInfo& c){
  std::lock_guard<std::mutex> lock(mutex);
- content_events.push_back(c);
+ metadata_end=std::max(metadata_end,U64(c.end));content_events.push_back(c);
  if(pending.size()<7)pending.push_back({ContentType,content_events.size()-1});else ++suppressed_notifications;
+}
+void SpdifResults::Add(const spdif::BurstEvent& event){
+ const U64 first=legacy_frames_written+(settings->detail==0?7:1);
+ std::lock_guard<std::mutex> lock(mutex);
+ if(event.phase==spdif::BurstPhase::Begin){BurstRecord record;record.begin=event;record.first_payload=first;burst_records.push_back(record);}
+ else if(!burst_records.empty()&&!burst_records.back().closed){auto& record=burst_records.back();if(event.phase==spdif::BurstPhase::Word)++record.words;else{record.end=event;record.closed=true;}}
+}
+void SpdifResults::PublishAnalysis(SpdifAnalysisBatch& batch,const spdif::HealthWindow& summary,const std::vector<spdif::PcmWindow>& current){
+ std::lock_guard<std::mutex> lock(mutex);
+ const auto queue=[&](U8 type,size_t index){if(pending.size()<7)pending.push_back({type,index});else ++suppressed_notifications;};
+ for(auto& h:batch.health){health_windows.push_back(std::move(h));queue(HealthType,health_windows.size()-1);}
+ for(auto& c:batch.changes){status_changes.push_back(std::move(c));queue(ChangeType,status_changes.size()-1);}
+ for(auto& p:batch.pcm){pcm_windows.push_back(std::move(p));queue(PcmType,pcm_windows.size()-1);}
+ health_summary=summary;current_pcm=current;
+ batch.health.clear();batch.changes.clear();batch.pcm.clear();
 }
 U64 SpdifResults::PublishPending(const spdif::Subframe& s){
  // Legacy bubbles contain only sample fields (or compact subframes). Structured notifications use a short
  // prefix of the next subframe, never overlapping another FrameV2. Their true
  // coverage remains in named fields and the metadata CSV exports.
  U64 cursor=s.start;
- struct Copy { U8 type; spdif::StatusBlock status; spdif::Diagnostic diagnostic; spdif::ContentInfo content; };
+ struct Copy { U8 type; spdif::StatusBlock status; spdif::Diagnostic diagnostic; spdif::ContentInfo content;spdif::HealthWindow health;spdif::StatusChange change;spdif::PcmWindow pcm; };
  std::vector<Copy> notifications;
  U64 suppressed=0;
  {
@@ -81,7 +94,10 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
    Copy copy;copy.type=event.type;
    if(event.type==StatusType)copy.status=status_blocks.at(event.index);
    else if(event.type==ContentType)copy.content=content_events.at(event.index);
-   else copy.diagnostic=diagnostics.at(event.index);
+   else if(event.type==DiagnosticType)copy.diagnostic=diagnostics.at(event.index);
+   else if(event.type==HealthType)copy.health=health_windows.at(event.index);
+   else if(event.type==ChangeType)copy.change=status_changes.at(event.index);
+   else copy.pcm=pcm_windows.at(event.index);
    notifications.push_back(std::move(copy));
   }
   pending.clear();suppressed=suppressed_notifications;suppressed_notifications=0;
@@ -92,7 +108,8 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
   FrameV2 v;
   if(event.type==StatusType){
    const auto& b=event.status;
-   v.AddString("channel",b.channel?"B / right":"A / left");
+   const auto info=spdif::status_info(b.c);const bool stereo=b.integrity&&info.supported&&info.stereo;
+   v.AddString("channel",stereo?(b.channel?"B / right":"A / left"):(b.channel?"B":"A"));
    v.AddByteArray("C",b.c.data(),b.c.size());v.AddByteArray("U",b.u.data(),b.u.size());
    v.AddInteger("coverage_start_sample",b.start);v.AddInteger("coverage_end_sample",b.end);
    v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddString("interpretation",b.interpretation.c_str());
@@ -104,6 +121,26 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
    v.AddInteger("Pc",c.pc);v.AddInteger("Pd",c.pd);v.AddBoolean("burst",c.burst);
    v.AddBoolean("complete",c.complete);v.AddBoolean("integrity",c.integrity);
    AddFrameV2(v,"content",cursor,cursor);
+  }else if(event.type>=HealthType){
+   if(event.type==HealthType){
+    const auto& h=event.health;v.AddString("record_json",spdif::json::record(h).c_str());
+    v.AddInteger("coverage_start_sample",h.start);v.AddInteger("coverage_end_exclusive_sample",h.end);
+    v.AddInteger("decoded_A",h.channels[0].decoded_subframes);v.AddInteger("decoded_B",h.channels[1].decoded_subframes);
+    v.AddInteger("parity_A",h.channels[0].parity_failures);v.AddInteger("parity_B",h.channels[1].parity_failures);
+    v.AddInteger("V_invalid_A",h.channels[0].v_invalid);v.AddInteger("V_invalid_B",h.channels[1].v_invalid);
+    v.AddInteger("sync_losses",h.sync_losses);v.AddInteger("unknown_stream_samples",h.unknown_stream_samples);
+   }else if(event.type==ChangeType){
+    const auto& c=event.change;v.AddString("record_json",spdif::json::record(c).c_str());v.AddString("channel",c.channel?"B":"A");
+    v.AddInteger("coverage_start_sample",c.start);v.AddInteger("coverage_end_exclusive_sample",c.end);
+    v.AddByteArray("changed_Cmask",c.changed_mask.data(),c.changed_mask.size());
+    v.AddString("old_status",spdif::interpret_status(c.previous).c_str());v.AddString("new_status",spdif::interpret_status(c.current).c_str());
+   }else{
+    const auto& p=event.pcm;v.AddString("record_json",spdif::json::record(p).c_str());v.AddString("channel",p.channel?"B":"A");
+    v.AddInteger("coverage_start_sample",p.start);v.AddInteger("coverage_end_exclusive_sample",p.end);v.AddInteger("bits",p.bits);v.AddInteger("accepted",p.accepted);
+    v.AddInteger("excluded",p.excluded_parity+p.excluded_invalid+p.excluded_unknown+p.excluded_non_pcm+p.excluded_layout);
+    v.AddInteger("peak",p.peak);v.AddDouble("RMS",p.rms);v.AddDouble("DC_mean",p.mean);v.AddDouble("silence_seconds",p.silence_seconds);v.AddInteger("full_scale_runs",p.full_scale_runs);
+   }
+   AddFrameV2(v,event.type==HealthType?"health_window":event.type==ChangeType?"status_change":"pcm_window",cursor,cursor);
   }else{
    const auto& d=event.diagnostic;
    v.AddInteger("coverage_start_sample",d.start);v.AddInteger("coverage_end_sample",d.end);
@@ -127,7 +164,7 @@ std::string SpdifResults::Text(const Frame& f){
  std::ostringstream s;
  switch(f.mType){
  case PreambleType:
-  s<<preamble(f)<<" / "<<(channel(f)?"B-R":"A-L");
+  s<<preamble(f)<<" / "<<((f.mData1&(1ull<<46))?(channel(f)?"B-R":"A-L"):(channel(f)?"B":"A"));
   if(preamble(f)=='B')s<<" BLOCK START";
   break;
  case AuxType:s<<"Aux="<<hex(raw&15,1)<<" (LSB4)";break;
@@ -136,17 +173,17 @@ std::string SpdifResults::Text(const Frame& f){
   if(settings->display)s<<hex(main,5);else s<<main_signed;
   s<<"; Full24=";
   if(settings->display)s<<hex(payload,6);else s<<signed_sample(raw);
-  s<<" (containers); "<<spdif::content_name(static_cast<spdif::ContentFormat>(f.mData1>>32));break;
+  s<<" (containers); "<<spdif::content_name(static_cast<spdif::ContentFormat>((f.mData1>>32)&255));break;
  case VType:s<<"V="<<((raw>>24)&1)<<(((raw>>24)&1)?" invalid":" valid");break;
  case UType:s<<"U="<<((raw>>25)&1);break;
  case CType:s<<"C="<<((raw>>26)&1);break;
  case PType:s<<"P="<<((raw>>27)&1)<<(parity_ok(raw)?" parity OK":" PARITY ERROR");break;
  case SampleType:
-  s<<(channel(f)?"B/R ":"A/L ")<<preamble(f)<<" ";
+  s<<((f.mData1&(1ull<<46))?(channel(f)?"B/R ":"A/L "):(channel(f)?"B ":"A "))<<preamble(f)<<" ";
   if(settings->display)s<<hex(payload,6);else s<<signed_sample(raw)<<" (container24)";
   if(!parity_ok(raw))s<<" PARITY ERROR";
   if((raw>>24)&1)s<<" V=1";
-  s<<"; "<<spdif::content_name(static_cast<spdif::ContentFormat>(f.mData1>>32));
+  s<<"; "<<spdif::content_name(static_cast<spdif::ContentFormat>((f.mData1>>32)&255));
   break;
  default:break;
  }
@@ -162,49 +199,3 @@ void SpdifResults::GenerateBubbleText(U64 index,Channel&,DisplayBase){
 void SpdifResults::GenerateFrameTabularText(U64 index,DisplayBase){ClearTabularText();auto t=Text(GetFrame(index));AddTabularText(t.c_str());}
 void SpdifResults::GeneratePacketTabularText(U64,DisplayBase){ClearTabularText();}
 void SpdifResults::GenerateTransactionTabularText(U64,DisplayBase){ClearTabularText();}
-void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 type){
- // Logic's Automation API exposes only the generic (id 0) export command.
- // Explicit non-default SDK export commands retain their named format.
- if(type==0)type=static_cast<U32>(settings->csv_export);
- std::ofstream out(name,std::ios::binary);if(!out)return;out.imbue(std::locale::classic());out<<std::setprecision(12);
- if(type==0)out<<"start_seconds,end_seconds,channel,preamble,block_position,raw_slots_4_31,payload_hex,signed_container_24,main_field_raw,auxiliary,V_invalid,U,C,P,parity_ok,measured_sample_rate_hz,sample_meaning,content\n";
- else if(type==1)out<<"start_seconds,end_seconds,channel,complete,integrity,C_bytes_earliest_first,U_bytes_earliest_first,interpretation\n";
- else if(type==2)out<<"start_seconds,end_seconds,code,message\n";
- else out<<"start_seconds,end_seconds,format,burst,complete,integrity,Pc,Pd,evidence\n";
- const auto trigger=analyzer->GetTriggerSample();const auto rate=analyzer->GetSampleRate();
- const auto time=[=](S64 sample){return (double(sample)-double(trigger))/rate;};
- U64 total=0;
- if(type==0)total=GetNumFrames();
- else {std::lock_guard<std::mutex> lock(mutex);total=type==1?status_blocks.size():type==2?diagnostics.size():content_events.size();}
- for(U64 i=0;i<total;++i){
-  if(UpdateExportProgressAndCheckForCancel(i,total))break;
-  if(type==0){
-   auto f=GetFrame(i);
-   if(f.mType==PreambleType){
-    // Field mode writes exactly seven consecutive frames for each subframe.
-    // Snapshot total may end mid-subframe during live export; omit incomplete rows.
-    if(i+6>=total)break;
-    auto last=GetFrame(i+6);
-    if(last.mType!=PType)continue;
-    f.mEndingSampleInclusive=last.mEndingSampleInclusive;
-    i+=6;
-   }else if(f.mType!=SampleType)continue;
-   const uint32_t raw=uint32_t(f.mData1);
-   out<<time(f.mStartingSampleInclusive)<<','<<time(f.mEndingSampleInclusive)<<','<<(channel(f)?'B':'A')<<','<<preamble(f)<<',';
-   if(position(f)>=0)out<<position(f);
-   out<<','<<hex(raw,7)<<','<<hex(raw&0xffffff,6)<<','<<signed_sample(raw)<<','<<hex((raw>>4)&0xfffff,5)<<','<<unsigned(raw&15);
-   for(unsigned bit=24;bit<28;++bit)out<<','<<((raw>>bit)&1);
-   out<<','<<parity_ok(raw)<<','<<measured(f)<<",numeric container only,"<<csv(spdif::content_name(static_cast<spdif::ContentFormat>(f.mData1>>32)))<<'\n';
-  }else if(type==1){
-   spdif::StatusBlock b;{std::lock_guard<std::mutex> lock(mutex);b=status_blocks.at(size_t(i));}
-   out<<time(b.start)<<','<<time(b.end)<<','<<(b.channel?'B':'A')<<",1,"<<b.integrity<<','<<bytes(b.c)<<','<<bytes(b.u)<<','<<csv(b.interpretation)<<'\n';
-  }else if(type==2){
-   spdif::Diagnostic d;{std::lock_guard<std::mutex> lock(mutex);d=diagnostics.at(size_t(i));}
-   out<<time(d.start)<<','<<time(d.end)<<','<<csv(d.code)<<','<<csv(d.message)<<'\n';
-  }else{
-   spdif::ContentInfo c;{std::lock_guard<std::mutex> lock(mutex);c=content_events.at(size_t(i));}
-   out<<time(c.start)<<','<<time(c.end)<<','<<csv(spdif::content_name(c.format))<<','<<c.burst<<','<<c.complete<<','<<c.integrity<<','<<hex(c.pc,4)<<','<<c.pd<<','<<csv(c.evidence)<<'\n';
-  }
- }
- UpdateExportProgressAndCheckForCancel(total,total);
-}

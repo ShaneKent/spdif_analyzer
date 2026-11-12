@@ -8,14 +8,22 @@ SpdifAnalyzer::~SpdifAnalyzer(){ KillThread(); }
 void SpdifAnalyzer::SetupResults(){ results.reset(new SpdifResults(this,&settings)); SetAnalyzerResults(results.get()); results->AddChannelBubblesWillAppearOn(settings.channel); }
 void SpdifAnalyzer::WorkerThread(){
  auto* input=GetAnalyzerChannelData(settings.channel);
+ SpdifAnalysisBatch batch;
+ spdif::AnalysisSink analysis_sink;
+ analysis_sink.health=[&](const spdif::HealthWindow& h){batch.health.push_back(h);};
+ analysis_sink.status_change=[&](const spdif::StatusChange& c){batch.changes.push_back(c);};
+ analysis_sink.pcm=[&](const spdif::PcmWindow& p){batch.pcm.push_back(p);};
+ spdif::Analysis analysis({double(GetSampleRate()),settings.window_ms/1000.0,0,settings.pcm_bits},analysis_sink);
+ const auto publish=[&]{results->PublishAnalysis(batch,analysis.summary(),analysis.current_pcm());};
  spdif::Sink sink;
- sink.subframe=[this](const spdif::Subframe& f){ results->Add(f); };
- sink.status=[this](const spdif::StatusBlock& b){ results->Add(b); };
- sink.content=[this](const spdif::ContentInfo& c){ results->Add(c); };
- sink.diagnostic=[this](const spdif::Diagnostic& d){ results->Add(d); };
+ sink.subframe=[&](const spdif::Subframe& f){results->Add(f);analysis.add(f);publish();};
+ sink.status=[&](const spdif::StatusBlock& b){results->Add(b);analysis.add(b);publish();};
+ sink.content=[&](const spdif::ContentInfo& c){results->Add(c);analysis.add(c);publish();};
+ sink.diagnostic=[&](const spdif::Diagnostic& d){results->Add(d);analysis.add(d);publish();};
+ sink.burst=[&](const spdif::BurstEvent& b){results->Add(b);};
  if(settings.nominal && GetSampleRate()<settings.nominal*512u)
-  results->Add(spdif::Diagnostic{0,0,"capture_rate_low","Capture rate is below four samples per half-cell for the manual nominal rate; increase the capture rate."});
- results->CommitResults();
+  sink.diagnostic(spdif::Diagnostic{0,0,"capture_rate_low","Capture rate is below four samples per half-cell for the manual nominal rate; increase the capture rate."});
+ results->PublishSnapshot(input->GetSampleNumber());results->CommitResults();
  spdif::Decoder decoder({double(GetSampleRate()),double(settings.nominal)},std::move(sink));
  U64 edges=0;
  for(;;){
@@ -23,10 +31,10 @@ void SpdifAnalyzer::WorkerThread(){
   // Commit a short tail before an edge wait, including temporary live idle.
   // Do not terminate the decoder when the currently buffered data is empty.
   if(!input->DoMoreTransitionsExistInCurrentData()){
-   results->CommitResults();ReportProgress(input->GetSampleNumber());
+   results->PublishSnapshot(input->GetSampleNumber(),decoder.pending_header());results->CommitResults();ReportProgress(input->GetSampleNumber());
   }
   input->AdvanceToNextEdge(); decoder.edge(input->GetSampleNumber());
-  if((++edges&1023)==0){ results->CommitResults(); ReportProgress(input->GetSampleNumber()); }
+  if((++edges&1023)==0){ results->PublishSnapshot(input->GetSampleNumber(),decoder.pending_header());results->CommitResults(); ReportProgress(input->GetSampleNumber()); }
  }
 }
 U32 SpdifAnalyzer::GetMinimumSampleRateHz(){ return std::max<U32>(50000000, (settings.nominal?settings.nominal:48000)*1024); }

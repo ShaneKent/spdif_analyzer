@@ -2,11 +2,11 @@
 
 Native digital S/PDIF decoder for Windows x64, with a portable C++17 decoder core. Windows build, native loading, simulated waveform decoding, and exported sample verification have passed. See the validation record for remaining platform and hardware checks.
 
-The first release targets automatic BMC clock recovery, B/M/W preambles in either polarity, raw and signed sample containers, V/U/C/P flags, parity and stream diagnostics, separate channel-status blocks, and CSV exports. IEC 61937 transport identification recognizes AC-3 (Dolby Digital), DTS types I/II/III, and E-AC-3 (Dolby Digital Plus). WAV export and decompression of compressed audio are outside this release.
+Version 0.2 retains BMC decoding, B/M/W preambles in either polarity, sample/field annotations, V/U/C/P flags, parity, channel status, and AC-3/DTS/E-AC-3 identification. It adds capture-health and PCM statistics, status changes, burst cadence checks, supported professional AES3 status, segmented PCM WAV, raw burst extraction, snapshot CSV bundles, structured offline policies, and two-stream comparison. Compressed-audio decompression remains outside scope.
 
 ## Build
 
-Windows requires Visual Studio 2019 or newer with C++, a Windows SDK, CMake 3.21+, and Git. In PowerShell:
+Windows requires Visual Studio 2019 or newer with C++, a Windows SDK, CMake 3.21+, and Git. Tests and offline scripts require Python 3.8+ (or build with `-DSPDIF_BUILD_TESTS=OFF` when only the plugin is needed). In PowerShell:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 16 2019" -A x64
@@ -32,7 +32,7 @@ ctest --test-dir build-core --output-on-failure
 
 ## Install and inspect
 
-See [installation and capture requirements](docs/INSTALL.md), [result and CSV definitions](docs/RESULTS.md), and the [validation record](docs/VALIDATION.md). Only digitized S/PDIF is supported; coaxial/optical receiver conditioning is external.
+See [installation and capture requirements](docs/INSTALL.md), [result and CSV definitions](docs/RESULTS.md), [v0.2 features](docs/FEATURES.md), [offline tools](docs/OFFLINE.md), and the [validation record](docs/VALIDATION.md). Only digitized S/PDIF is supported; coaxial/optical receiver conditioning is external.
 
 The native Windows DLL is `build-win/Analyzers/Release/SpdifAnalyzer.dll` when using `scripts/build_windows.ps1`. Package it with `python scripts/package.py`; the ignored `artifacts` directory receives a ZIP and SHA-256 checksum.
 
@@ -55,3 +55,10 @@ build-core/decode_edges 100000000 < edges.txt
 The sample rate must match the original capture. This utility prints status, content evidence and diagnostic counts without retaining every sample. Raw captures remain local.
 
 To repeat the demo application check, configure this analyzer on D0 **before** starting a simulated capture, save the capture, install Saleae's `logic2-automation` package in a test environment, then run `python scripts/smoke_logic.py demo.sal --port 10430`. The API creates a new capture before analyzers are added; retake a demo capture in the configured tab so the plugin can supply its simulation waveform.
+
+
+## Analysis and export selection
+
+Keep **Export output → Selected CSV** for the original CSV workflow. Other choices provide health JSON, status-change JSONL, PCM-statistics JSONL, segmented WAV, IEC61937 payload files, or one bundle containing all four CSV datasets. **Analysis window (ms)** controls summary windows; **PCM bits override** resolves unspecified precision explicitly. WAV rate/stereo overrides are optional and never bypass content, parity, or validity checks.
+
+New directory exports never overwrite an existing directory and remain marked `INCOMPLETE` after cancellation or I/O failure. Existing settings archives migrate with their original waveform/CSV choices preserved. Details and limitations are in [feature definitions](docs/FEATURES.md).
