@@ -1,10 +1,16 @@
 #pragma once
+#include "Version.h"
 #include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 namespace spdif {
+// Separate integrity layers use these states; no unchecked layer implies pass.
+enum class IntegrityCheck : uint8_t { NotApplicable,NotChecked,Absent,Unsupported,Truncated,Failed,Passed };
+const char* integrity_name(IntegrityCheck state);
+uint8_t professional_crc(const std::array<uint8_t,24>& bytes);
+IntegrityCheck status_crc(const std::array<uint8_t,24>& bytes);
 enum class ContentFormat : uint8_t { Unknown, Pcm, NonPcm, Ac3, Dts1, Dts2, Dts3, Eac3, Null, Pause, Unsupported, Provisional, Conflict };
 const char* content_name(ContentFormat format);
 struct ContentInfo {
@@ -19,6 +25,8 @@ struct StatusInfo {
  bool professional=false,supported=false,non_audio=false,stereo=false,audio_fields_reliable=true;
  unsigned channel_mode=0,emphasis_code=0,sample_rate=0,word_length=0;
  SampleLayout layout{};
+ IntegrityCheck crc=IntegrityCheck::NotApplicable;
+ uint8_t expected_crc=0;
 };
 // Stateless field interpretation; caller must establish block completeness/integrity.
 StatusInfo status_info(const std::array<uint8_t,24>& bytes);
@@ -47,6 +55,8 @@ struct Subframe {
 struct StatusBlock {
  uint64_t start=0,end=0; unsigned channel=0; std::array<uint8_t,24> c{},u{};
  bool integrity=true; std::string interpretation;
+ IntegrityCheck crc=IntegrityCheck::NotChecked;
+ uint8_t expected_crc=0;
 };
 struct Diagnostic { uint64_t start=0,end=0; std::string code,message; };
 struct Sink {

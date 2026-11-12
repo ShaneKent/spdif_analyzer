@@ -56,7 +56,7 @@ def check_bundle(directory):
     required = {'schema_version', 'analyzer_version', 'input_channel', 'capture_rate', 'settings',
                 'coverage_start_sample', 'coverage_end_sample', 'complete', 'state', 'datasets'}
     assert required <= manifest.keys()
-    assert manifest['schema_version'] == '1' and manifest['analyzer_version'] == '0.2.0'
+    assert manifest['schema_version'] == '1' and manifest['analyzer_version'] in ('0.2.0', '0.3.0')
     assert manifest['input_channel'] == 'D0' and manifest['capture_rate'] > 0
     assert manifest['complete'] is True and manifest['state'] == 'complete'
     assert not (directory/'INCOMPLETE').exists()

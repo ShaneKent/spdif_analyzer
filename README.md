@@ -4,6 +4,8 @@ Native digital S/PDIF decoder for Windows x64, with a portable C++17 decoder cor
 
 Version 0.2 retains BMC decoding, B/M/W preambles in either polarity, sample/field annotations, V/U/C/P flags, parity, channel status, and AC-3/DTS/E-AC-3 identification. It adds capture-health and PCM statistics, status changes, burst cadence checks, supported professional AES3 status, segmented PCM WAV, raw burst extraction, snapshot CSV bundles, structured offline policies, and two-stream comparison. Compressed-audio decompression remains outside scope.
 
+Version 0.3 adds bounded [codec metadata and integrity checks](docs/CODECS.md), [windowed delay/drift analysis](docs/OFFLINE.md#track-changing-delay), a [standalone interactive report](docs/REPORT.md), [pipeline benchmarks and fuzzing](docs/PERFORMANCE.md), and [tagged release packaging](docs/RELEASING.md). Transport identification still does not imply successful audio decoding.
+
 ## Build
 
 Windows requires Visual Studio 2019 or newer with C++, a Windows SDK, CMake 3.21+, and Git. Tests and offline scripts require Python 3.8+ (or build with `-DSPDIF_BUILD_TESTS=OFF` when only the plugin is needed). In PowerShell:

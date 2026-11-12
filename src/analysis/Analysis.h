@@ -16,6 +16,7 @@ namespace spdif {
 struct ChannelHealth {
  uint64_t decoded_subframes=0,decoded_coverage_samples=0,unknown_coverage_samples=0;
  uint64_t parity_failures=0,v_invalid=0,sync_losses=0,status_good=0,status_damaged=0;
+ uint64_t status_crc_passed=0,status_crc_failed=0,status_crc_unverified=0;
  uint64_t rate_measurements=0;
  bool has_fault=false; uint64_t first_fault=0,last_fault=0;
  double mean_sample_rate=0,min_sample_rate=0,max_sample_rate=0;

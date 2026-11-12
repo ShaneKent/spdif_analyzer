@@ -31,11 +31,11 @@ int main(int argc,char** argv){
  auto* rate=static_cast<AnalyzerSettingInterfaceInteger*>(settings->GetSettingsInterface(8));
  auto* stereo=static_cast<AnalyzerSettingInterfaceBool*>(settings->GetSettingsInterface(9));
  if(output->GetNumber()!=0||window->GetInteger()!=1000||bits->GetInteger()!=0||rate->GetInteger()!=0||stereo->GetValue()){std::cerr<<"Unexpected v4 defaults\n";destroy(analyzer);return 1;}
- output->SetNumber(6);window->SetInteger(250);bits->SetInteger(20);rate->SetInteger(48000);stereo->SetValue(true);
+ output->SetNumber(7);window->SetInteger(250);bits->SetInteger(20);rate->SetInteger(48000);stereo->SetValue(true);
  input->SetChannel(Channel(1,0,DIGITAL_CHANNEL));detail->SetNumber(1);csv->SetNumber(3);
  if(!settings->SetSettingsFromInterfaces()){std::cerr<<"Unable to select compact waveform view\n";destroy(analyzer);return 1;}
  std::string compact=settings->SaveSettings();settings->LoadSettings(compact.c_str());
- if(detail->GetNumber()!=1 || csv->GetNumber()!=3 || output->GetNumber()!=6 || window->GetInteger()!=250 || bits->GetInteger()!=20 || rate->GetInteger()!=48000 || !stereo->GetValue()){std::cerr<<"Compact waveform setting round trip failed\n";destroy(analyzer);return 1;}
+ if(detail->GetNumber()!=1 || csv->GetNumber()!=3 || output->GetNumber()!=7 || window->GetInteger()!=250 || bits->GetInteger()!=20 || rate->GetInteger()!=48000 || !stereo->GetValue()){std::cerr<<"Compact waveform setting round trip failed\n";destroy(analyzer);return 1;}
  SimpleArchive legacy;Channel c(1,0,DIGITAL_CHANNEL);legacy<<U32(1);legacy<<c;legacy<<U32(48000);legacy<<S32(1);
  settings->LoadSettings(legacy.GetString());
  if(detail->GetNumber()!=0 || csv->GetNumber()!=0){std::cerr<<"Version1 migration must default to Fields/subframes\n";destroy(analyzer);return 1;}
@@ -45,7 +45,10 @@ int main(int argc,char** argv){
  SimpleArchive version3;version3<<U32(3);version3<<c;version3<<U32(48000);version3<<S32(0);version3<<S32(0);version3<<S32(3);
  settings->LoadSettings(version3.GetString());
  if(csv->GetNumber()!=3||output->GetNumber()!=0||window->GetInteger()!=1000||bits->GetInteger()!=0||rate->GetInteger()!=0||stereo->GetValue()){std::cerr<<"Version3 migration must preserve CSV and default v4 options\n";destroy(analyzer);return 1;}
- std::cout<<"Loaded "<<name()<<"; entry points, create/destroy and settings round trip, waveform/CSV/v4 selections and v1/v2/v3 migration passed\n";
+ SimpleArchive version4;version4<<U32(4);version4<<c;version4<<U32(48000);version4<<S32(1);version4<<S32(1);version4<<S32(2);version4<<S32(6);version4<<U32(100);version4<<U32(24);version4<<U32(48000);version4<<bool(true);
+ settings->LoadSettings(version4.GetString());
+ if(output->GetNumber()!=6||window->GetInteger()!=100||bits->GetInteger()!=24||!stereo->GetValue()||detail->GetNumber()!=1||csv->GetNumber()!=2){std::cerr<<"Version4 migration failed\\n";destroy(analyzer);return 1;}
+ std::cout<<"Loaded "<<name()<<"; entry points, create/destroy and settings round trip, waveform/CSV/v5 codec selections and v1/v2/v3/v4 migration passed\n";
  destroy(analyzer);FreeLibrary(dll);return 0;
 }
 #else

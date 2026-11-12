@@ -1,6 +1,8 @@
 #include "core/Decoder.h"
+#include "input/EdgeInput.h"
 #include "analysis/Analysis.h"
 #include "report/Events.h"
+#include "report/CodecEvents.h"
 #include "export/Exports.h"
 #include <algorithm>
 #include <charconv>
@@ -15,7 +17,7 @@
 #include <string>
 #include <vector>
 namespace {
-uint64_t integer(const std::string& s){uint64_t n=0;auto p=std::from_chars(s.data(),s.data()+s.size(),n);if(p.ec!=std::errc()||p.ptr!=s.data()+s.size())throw std::invalid_argument("Invalid unsigned integer: "+s);return n;}
+uint64_t integer(const std::string& s){return spdif::input::unsigned_integer(s);}
 double real(const std::string& s){size_t used=0;double n=std::stod(s,&used);if(used!=s.size()||!std::isfinite(n))throw std::invalid_argument("Invalid finite number: "+s);return n;}
 std::string lower(std::string s){for(auto& c:s)c=char(std::tolower(static_cast<unsigned char>(c)));return s;}
 bool matches(const std::string& s,spdif::ContentFormat f){using F=spdif::ContentFormat;return (s=="pcm"&&f==F::Pcm)||(s=="nonpcm"&&f==F::NonPcm)||(s=="ac3"&&f==F::Ac3)||(s=="eac3"&&f==F::Eac3)||(s=="dts1"&&f==F::Dts1)||(s=="dts2"&&f==F::Dts2)||(s=="dts3"&&f==F::Dts3)||(s=="dts"&&(f==F::Dts1||f==F::Dts2||f==F::Dts3));}
@@ -61,23 +63,24 @@ int main(int argc,char** argv){
  if(!opt.wav.empty())wav=std::make_unique<spdif::exports::WavWriter>(opt.wav,spdif::exports::WavConfig{opt.capture,opt.bits,opt.rate,opt.stereo});
  if(!opt.bursts.empty())bursts=std::make_unique<spdif::exports::BurstWriter>(opt.bursts);
  auto emit=[&](const auto& value){if(opt.json)std::cout<<spdif::json::record(value)<<'\n';};
- if(opt.json)std::cout<<spdif::json::event("metadata").text("analyzer_version","0.2.0").number("capture_rate_hz",opt.capture).number("nominal_rate_hz",opt.nominal).number("window_seconds",opt.window).sample("origin_sample",opt.origin).integer("pcm_bits_override",opt.bits).text("sample_index_encoding","decimal-string").str()<<'\n';
+ if(opt.json)std::cout<<spdif::json::event("metadata").text("analyzer_version",spdif::analyzer_version).number("capture_rate_hz",opt.capture).number("nominal_rate_hz",opt.nominal).number("window_seconds",opt.window).sample("origin_sample",opt.origin).integer("pcm_bits_override",opt.bits).text("sample_index_encoding","decimal-string").str()<<'\n';
  spdif::AnalysisSink analysis_sink;analysis_sink.health=[&](const auto& h){emit(h);};analysis_sink.pcm=[&](const auto& p){emit(p);};analysis_sink.status_change=[&](const auto& c){emit(c);};
  spdif::Analysis analysis({opt.capture,opt.window,opt.origin,opt.bits},analysis_sink);
  std::map<std::string,uint64_t> errors;uint64_t count=0,blocks=0,last=opt.origin,parity=0,conflicts=0;double sum=0;bool seen=false,expected_seen=false;
+ spdif::codec::Inspector codec([&](const spdif::codec::CodecInfo& c){emit(c);if(bursts)bursts->codec(c);if(!opt.json)std::cout<<"codec format="<<spdif::codec::codec_name(c.frame.codec)<<" header="<<spdif::codec::header_state_name(c.frame.header)<<" sample_rate="<<c.frame.sample_rate<<" channels="<<c.frame.channels<<" frame_crc="<<spdif::integrity_name(c.frame.frame_crc)<<" "<<c.frame.evidence<<'\n';});
  spdif::Sink sink;
  sink.subframe=[&](const spdif::Subframe& f){++count;sum+=f.sample_rate;if(!f.parity_ok)++parity;if(f.content==spdif::ContentFormat::Conflict)++conflicts;if(matches(opt.expected,f.content))expected_seen=true;emit(f);analysis.add(f);if(wav)wav->subframe(f);};
  sink.content=[&](const spdif::ContentInfo& c){emit(c);analysis.add(c);if(c.format==spdif::ContentFormat::Conflict)++conflicts;if(!opt.json)std::cout<<"content format="<<spdif::content_name(c.format)<<" complete="<<c.complete<<" integrity="<<c.integrity<<" "<<c.evidence<<'\n';};
  sink.status=[&](const spdif::StatusBlock& b){++blocks;emit(b);analysis.add(b);if(wav)wav->status(b);if(!opt.json)std::cout<<"status channel="<<b.channel<<" integrity="<<b.integrity<<" "<<b.interpretation<<'\n';};
  sink.diagnostic=[&](const spdif::Diagnostic& d){++errors[d.code];emit(d);analysis.add(d);if(wav)wav->diagnostic(d);if(errors[d.code]<=3)std::cerr<<d.code<<" at "<<d.start<<": "<<d.message<<'\n';};
- sink.burst=[&](const spdif::BurstEvent& b){if(bursts)bursts->burst(b);};
+ sink.burst=[&](const spdif::BurstEvent& b){codec.burst(b);if(bursts)bursts->burst(b);};
  spdif::Decoder decoder({opt.capture,opt.nominal},sink);
  std::string token;while(std::cin>>token){last=integer(token);if(last<opt.origin)throw std::invalid_argument("Input edge precedes capture origin");decoder.edge(last);seen=true;}
  if(!std::cin.eof())throw std::runtime_error("Cannot read edge input");
  uint64_t end=opt.end;
  if(!opt.explicit_end){if(seen&&last==std::numeric_limits<uint64_t>::max())throw std::invalid_argument("Exclusive capture end cannot be represented");end=seen?last+1:opt.origin;}
  if(seen&&end<=last)throw std::invalid_argument("Exclusive capture end must follow the final edge");
- decoder.finish(end?end-1:0);analysis.finish(end);if(wav)wav->finish(end);if(bursts)bursts->finish();
+ decoder.finish(end?end-1:0);codec.finish();analysis.finish(end);if(wav)wav->finish(end);if(bursts)bursts->finish();
  std::vector<std::string> failed;
  if(!count)failed.push_back("no_frames");
  if(parity&&opt.failures.count("parity"))failed.push_back("parity");

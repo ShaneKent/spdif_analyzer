@@ -1,0 +1,221 @@
+name: Release packages
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure
+        shell: bash
+        run: |
+          args=()
+          if [ "$RUNNER_OS" = macOS ]; then
+            args+=("-DCMAKE_OSX_ARCHITECTURES=$(uname -m)")
+          fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "${args[@]}"
+      - run: cmake --build build --config Release --parallel
+      - name: All portable and package checks
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package only the production analyzer
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, sys
+          names={'SpdifAnalyzer.dll','libSpdifAnalyzer.so','SpdifAnalyzer.so','libSpdifAnalyzer.dylib','SpdifAnalyzer.dylib'}
+          plugins=[p for p in pathlib.Path('build/Analyzers').rglob('*') if p.is_file() and p.name in names]
+          if len(plugins)!=1: raise SystemExit('Expected exactly one production binary: '+str(plugins))
+          args=[sys.executable,'scripts/package.py','--plugin',str(plugins[0]),'--source-sha',os.environ['SOURCE_SHA']]
+          if os.environ['EVENT']=='push' and os.environ['REF_TYPE']=='tag':
+              args+=['--release','--tag',os.environ['REF_NAME']]
+          subprocess.run(args,check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.zip.sha256
+          if-no-files-found: error
+  sanitize:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DSPDIF_BUILD_PLUGIN=OFF -DSPDIF_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+  fuzz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DSPDIF_BUILD_PLUGIN=OFF -DSPDIF_BUILD_TESTS=OFF -DSPDIF_BUILD_FUZZERS=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build-fuzz --parallel
+      - name: Bounded production-source fuzz gates
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-artifacts"
+          for target in edges input codec; do
+            cp -r "tests/fuzz/$target" "$RUNNER_TEMP/corpus-$target"
+            limit=4096
+            if [ "$target" = codec ]; then limit=24569; fi
+            "build-fuzz/fuzz_$target" "$RUNNER_TEMP/corpus-$target" -seed=1 -max_len="$limit" -timeout=2 -rss_limit_mb=512 -max_total_time=10 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: release-fuzz-failures
+          path: ${{ runner.temp }}/fuzz-artifacts/
+  validate:
+    needs: [build, sanitize, fuzz]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: collected
+      - name: Verify the entire platform set before staging
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import importlib.util,json,os,pathlib,re,shutil
+          spec=importlib.util.spec_from_file_location('package','scripts/package.py');p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
+          files=list(pathlib.Path('collected').rglob('*'))
+          archives=[f for f in files if f.is_file() and f.suffix=='.zip']
+          if len(archives)!=3 or len([f for f in files if f.is_file()])!=6: raise SystemExit('Expected three archives and three checksums')
+          tagged=os.environ['EVENT']=='push'
+          sdk=re.search(r'GIT_REPOSITORY https://github.com/saleae/AnalyzerSDK.git GIT_TAG ([0-9a-f]{40})',pathlib.Path('CMakeLists.txt').read_text())[1]
+          version=re.search(r'SPDIF_ANALYZER_VERSION "([0-9.]+)"',pathlib.Path('src/core/Version.h').read_text())[1]
+          platforms=set();records=[];dest=pathlib.Path('validated');dest.mkdir()
+          for archive in archives:
+              m=p.verify(archive,expected_source=os.environ['SOURCE_SHA'],expected_tag=os.environ['TAG'] if tagged else None,require_release=tagged)
+              if m['platform'] in platforms or m['version']!=version or m['sdk_revision']!=sdk: raise SystemExit('Duplicate platform or mismatched provenance')
+              if m['platform'] in ('windows','linux') and m['architecture']!='x64': raise SystemExit('Unexpected primary platform architecture')
+              expected=f"SpdifAnalyzer-{version}-{m['platform']}-{m['architecture']}.zip"
+              if archive.name!=expected: raise SystemExit('Unexpected package filename')
+              platforms.add(m['platform']);records.append(m)
+              for source in (archive,archive.with_suffix('.zip.sha256')): shutil.copyfile(source,dest/source.name)
+          if platforms!={'windows','linux','macos'}: raise SystemExit('Incomplete required platform set')
+          link='https://github.com/'+os.environ['REPOSITORY']+'/blob/'+os.environ['SOURCE_SHA']
+          notes=f"S/PDIF Analyzer {version}\n\nSource: `{os.environ['SOURCE_SHA']}`\nSDK: `{sdk}`\n\n"
+          notes+='Packages: '+', '.join(m['platform']+' '+m['architecture'] for m in records)+'.\n\n'
+          highlights=pathlib.Path('docs/RELEASING.md').read_text().split('## Release highlights\n',1)[1].split('\n## ',1)[0]
+          notes+='## Changes\n'+highlights+'\n\n'
+          notes+='See [installation and upgrade instructions]('+link+'/docs/INSTALL.md), [release procedure and runtime limits]('+link+'/docs/RELEASING.md), [features]('+link+'/docs/FEATURES.md), and [validation evidence]('+link+'/docs/VALIDATION.md).\n\n'
+          notes+='Logic 2.3.43 or newer is required. Assets are unsigned/not notarized. CI builds, portable tests, sanitizers and bounded fuzz smoke passed; this does not establish GUI loading on every platform. Architecture is read from each binary, including the actual macOS runner output. Preserve other installed analyzers and do not copy SDK runtime libraries into Logic.\n'
+          (dest/'RELEASE_NOTES.md').write_text(notes)
+          (dest/'RELEASE_MANIFEST.json').write_text(json.dumps(dict(schema_version=1,source_sha=os.environ['SOURCE_SHA'],version=version,packages=records),indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-release-packages
+          path: validated/
+          if-no-files-found: error
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: validated-release-packages
+          path: validated
+      - name: Stage a new draft, verify uploaded bytes, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import hashlib,json,os,pathlib,urllib.error,urllib.parse,urllib.request
+          repo=os.environ['REPOSITORY'];tag=os.environ['TAG'];token=os.environ['GH_TOKEN']
+          base='https://api.github.com/repos/'+repo
+          headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          def origin(url):
+              parsed=urllib.parse.urlsplit(url)
+              if parsed.scheme.lower()!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                  raise ValueError('Release requests and redirects require credential-free HTTPS URLs')
+              port=443 if parsed.port is None else parsed.port
+              if port==0: raise ValueError('Release requests require a valid HTTPS port')
+              return parsed.scheme.lower(),parsed.hostname.lower(),port
+          class ReleaseRedirectHandler(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,response_headers,newurl):
+                  newurl=urllib.parse.urljoin(req.full_url,newurl)
+                  changed=origin(req.full_url)!=origin(newurl)
+                  redirected=super().redirect_request(req,fp,code,msg,response_headers,newurl)
+                  # Same HTTPS origin retains the normal request authorization.
+                  # Signed CDN URLs work without forwarding the GitHub token.
+                  if redirected is not None and changed:
+                      redirected.remove_header('Authorization')
+                      redirected.remove_header('Proxy-authorization')
+                  return redirected
+          opener=urllib.request.build_opener(ReleaseRedirectHandler())
+          def request(url,method='GET',body=None,extra=None):
+              origin(url)
+              h={**headers,**(extra or {})}
+              if isinstance(body,dict): body=json.dumps(body).encode();h['Content-Type']='application/json'
+              return opener.open(urllib.request.Request(url,data=body,headers=h,method=method),timeout=120)
+          def read_json(response):
+              maximum=16*1024*1024
+              data=response.read(maximum+1)
+              if len(data)>maximum: raise SystemExit('Remote JSON response exceeds release validation limit')
+              return json.loads(data)
+          # Authenticated paginated listing includes drafts; never replace one.
+          page=1
+          while True:
+              with request(base+f'/releases?per_page=100&page={page}') as r: releases=read_json(r)
+              if any(r['tag_name']==tag for r in releases): raise SystemExit('A draft or published release already exists for this version; refusing to overwrite')
+              if len(releases)<100: break
+              page+=1
+          directory=pathlib.Path('validated');manifest=json.loads((directory/'RELEASE_MANIFEST.json').read_text())
+          if manifest['source_sha']!=os.environ['SOURCE_SHA'] or tag!='v'+manifest['version']: raise SystemExit('Validated provenance/tag mismatch')
+          files=sorted(directory.glob('*.zip'))+sorted(directory.glob('*.zip.sha256'))
+          if len(files)!=6: raise SystemExit('Missing validated platform assets')
+          for archive in directory.glob('*.zip'):
+              digest=hashlib.sha256(archive.read_bytes()).hexdigest()
+              if archive.with_suffix('.zip.sha256').read_text()!=digest+'  '+archive.name+'\n': raise SystemExit('Local staged archive hash mismatch')
+          # A failure from this point intentionally leaves a private draft.
+          body={'tag_name':tag,'target_commitish':os.environ['SOURCE_SHA'],'name':'S/PDIF Analyzer '+manifest['version'],
+                'body':(directory/'RELEASE_NOTES.md').read_text(),'draft':True,'prerelease':False}
+          with request(base+'/releases','POST',body) as r: release=read_json(r)
+          if not release['draft']: raise SystemExit('Server did not create a draft')
+          upload=release['upload_url'].split('{')[0];uploaded=[]
+          for path in files:
+              content=path.read_bytes()
+              with request(upload+'?name='+urllib.parse.quote(path.name),'POST',content,{'Content-Type':'application/octet-stream'}) as r: asset=read_json(r)
+              if asset['state']!='uploaded' or asset['size']!=len(content) or asset['name']!=path.name: raise SystemExit('Upload metadata mismatch; draft remains unpublished')
+              # Download via authenticated API and hash the actual remote bytes.
+              with request(asset['url'],extra={'Accept':'application/octet-stream'}) as r: remote=r.read(len(content)+1)
+              if hashlib.sha256(remote).digest()!=hashlib.sha256(content).digest(): raise SystemExit('Remote asset hash mismatch; draft remains unpublished')
+              uploaded.append(asset['id'])
+          with request(base+'/releases/'+str(release['id'])+'/assets') as r: assets=read_json(r)
+          if sorted(a['id'] for a in assets)!=sorted(uploaded): raise SystemExit('Unexpected/missing remote assets; draft remains unpublished')
+          with request(base+'/releases/'+str(release['id']),'PATCH',{'draft':False}) as r: published=read_json(r)
+          if published['draft']: raise SystemExit('Release did not publish')
+          print(published['html_url'])
+          PY

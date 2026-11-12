@@ -1,4 +1,5 @@
 #include "Exports.h"
+#include "report/CodecEvents.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -16,7 +17,7 @@ void new_dir(const fs::path& p){if(fs::exists(p)||!fs::create_directories(p))thr
 void number16(std::ostream& o,uint16_t n){o.put(char(n&255));o.put(char(n>>8));}
 void number32(std::ostream& o,uint32_t n){number16(o,uint16_t(n));number16(o,uint16_t(n>>16));}
 std::string filename(const char* prefix,uint64_t n,const char* ext){std::ostringstream s;s.imbue(std::locale::classic());s<<prefix<<std::setw(6)<<std::setfill('0')<<n<<ext;return s.str();}
-bool codec(ContentFormat c){return c==ContentFormat::Ac3||c==ContentFormat::Dts1||c==ContentFormat::Dts2||c==ContentFormat::Dts3||c==ContentFormat::Eac3;}
+bool is_codec(ContentFormat c){return c==ContentFormat::Ac3||c==ContentFormat::Dts1||c==ContentFormat::Dts2||c==ContentFormat::Dts3||c==ContentFormat::Eac3;}
 void wav_header(std::ostream& out,unsigned rate,unsigned bits,uint32_t bytes){
  out.write("RIFF",4);number32(out,60+bytes);out.write("WAVEfmt ",8);number32(out,40);
  number16(out,0xfffe);number16(out,2);number32(out,rate);number32(out,rate*6);number16(out,6);number16(out,24);number16(out,22);number16(out,uint16_t(bits));number32(out,3);
@@ -27,6 +28,7 @@ struct WavWriter::Impl {
  fs::path dir;WavConfig cfg;std::ofstream index,wav;bool done=false,active=false,pending=false,have_previous=false;
  Subframe left{};uint64_t previous_end=0,observed_end_exclusive=0,segment_number=0,frames=0,start=0,end=0;
  unsigned rates[2]{},declared_rates[2]{},rate=0,bits=0;bool professional=false,overridden_bits=false;
+ bool status_crc_failed[2]{};
  std::string part_name,final_name;
  Impl(const fs::path& p,WavConfig c):dir(p),cfg(c){
   if(!(cfg.capture_rate>0)||!std::isfinite(cfg.capture_rate)||cfg.capture_rate>double(UINT32_MAX))throw std::invalid_argument("WAV requires a finite capture rate in (0, UINT32_MAX]");
@@ -47,6 +49,7 @@ struct WavWriter::Impl {
   if(f.content!=ContentFormat::Pcm)return "not_confirmed_pcm";
   if(!f.parity_ok)return "parity_error";
   if(f.validity)return "validity_invalid";
+  if(status_crc_failed[f.channel])return "status_crc_failed";
   layout=f.layout;
   if(!layout.stereo && !cfg.assume_stereo)return "stereo_layout_unknown";
   if(!layout.known && cfg.bits_override){layout.known=true;layout.bits=cfg.bits_override;}
@@ -85,7 +88,7 @@ struct WavWriter::Impl {
 };
 WavWriter::WavWriter(const fs::path& p,WavConfig c):impl(new Impl(p,c)){}
 WavWriter::~WavWriter()=default;
-void WavWriter::status(const StatusBlock& b){if(b.channel>1)throw std::invalid_argument("Invalid status channel");const auto info=status_info(b.c);impl->rates[b.channel]=(b.integrity&&info.supported&&!info.non_audio)?info.sample_rate:0;}
+void WavWriter::status(const StatusBlock& b){if(b.channel>1)throw std::invalid_argument("Invalid status channel");const auto info=status_info(b.c);if(info.crc==IntegrityCheck::Failed)impl->status_crc_failed[b.channel]=true;else if(b.integrity&&info.supported&&!info.non_audio)impl->status_crc_failed[b.channel]=false;impl->rates[b.channel]=(b.integrity&&info.supported&&!info.non_audio)?info.sample_rate:0;}
 void WavWriter::subframe(const Subframe& f){impl->sample(f);}
 void WavWriter::diagnostic(const Diagnostic& d){if(d.code=="sync_loss"||d.code=="channel_order"||d.code=="truncated"||d.code=="block_length"){impl->close(d.code);impl->clear_pending("unpaired_"+d.code);impl->rates[0]=impl->rates[1]=0;impl->have_previous=false;}}
 void WavWriter::finish(uint64_t end_exclusive){if(impl->done)return;if(end_exclusive<impl->observed_end_exclusive)throw std::invalid_argument("WAV exclusive end precedes observed subframes");impl->close("end_of_input");impl->clear_pending("unpaired_end_of_input");impl->index<<"{\"type\":\"finish\",\"complete\":true,\"end_exclusive_sample\":"<<quote(std::to_string(end_exclusive))<<"}\n";impl->index.flush();checked(impl->index);impl->index.close();checked(impl->index);impl->done=true;fs::remove(impl->dir/"INCOMPLETE");}
@@ -97,7 +100,7 @@ struct BurstWriter::Impl {
  void end(const ContentInfo& info,bool good,const std::string& reason){
   if(!active)return;
   if(payload.is_open()){payload.flush();checked(payload);payload.close();checked(payload);}
-  const bool accepted=good&&!(begin.info.pc&128)&&receiving&&!malformed&&info.complete&&info.integrity&&codec(info.format)&&bits==begin.declared_bits;
+  const bool accepted=good&&!(begin.info.pc&128)&&receiving&&!malformed&&info.complete&&info.integrity&&is_codec(info.format)&&bits==begin.declared_bits;
   if(accepted)fs::rename(dir/part_name,dir/final_name);else if(!part_name.empty())fs::remove(dir/part_name);
   index<<"{\"type\":\"burst\",\"accepted\":"<<(accepted?"true":"false")<<",\"file\":"<<(accepted?quote(final_name):"null")<<",\"start_sample\":"<<quote(std::to_string(begin.info.start))<<",\"end_sample\":"<<quote(std::to_string(info.end))<<",\"format\":"<<quote(content_name(info.format))<<",\"stream_number\":"<<((begin.info.pc>>13)&7)<<",\"Pc\":"<<begin.info.pc<<",\"Pd\":"<<begin.info.pd<<",\"declared_bits\":"<<begin.declared_bits<<",\"observed_bits\":"<<bits<<",\"payload_words\":"<<words<<",\"final_word_valid_bits\":"<<(bits?((bits-1)%16+1):0)<<",\"complete\":"<<(info.complete?"true":"false")<<",\"integrity\":"<<(info.integrity?"true":"false")<<",\"reason\":"<<quote(accepted?"confirmed_complete_payload":reason)<<",\"evidence\":"<<quote(info.evidence)<<"}\n";checked(index);active=false;receiving=false;part_name.clear();
  }
@@ -130,6 +133,7 @@ struct BurstWriter::Impl {
 BurstWriter::BurstWriter(const fs::path& p):impl(new Impl(p)){}
 BurstWriter::~BurstWriter()=default;
 void BurstWriter::burst(const BurstEvent& e){impl->event(e);}
+void BurstWriter::codec(const spdif::codec::CodecInfo& info){if(impl->done)throw std::logic_error("Burst writer already finished");impl->index<<"{\"type\":\"codec_frame\",\"record\":"<<spdif::json::record(info)<<"}\n";checked(impl->index);}
 void BurstWriter::finish(){if(impl->done)return;if(impl->active){auto info=impl->begin.info;info.end=impl->last_end;impl->end(info,false,"end_of_input_before_confirmation");}impl->index<<"{\"type\":\"finish\",\"complete\":true}\n";impl->index.flush();checked(impl->index);impl->index.close();checked(impl->index);impl->done=true;fs::remove(impl->dir/"INCOMPLETE");}
 namespace {
 const char* dataset_names[]={"subframes.csv","channel-status.csv","diagnostics.csv","content.csv"};

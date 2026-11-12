@@ -10,12 +10,32 @@ const char* original(unsigned code) {
  switch(code){case 0:return "not indicated";case 1:return "192000";case 2:return "12000";case 3:return "176400";case 5:return "96000";case 6:return "8000";case 7:return "88200";case 8:return "16000";case 9:return "24000";case 10:return "11025";case 11:return "22050";case 12:return "32000";case 13:return "48000";case 15:return "44100";default:return nullptr;}
 }
 }
+const char* integrity_name(IntegrityCheck state) {
+ switch(state){case IntegrityCheck::NotApplicable:return "not_applicable";case IntegrityCheck::NotChecked:return "not_checked";case IntegrityCheck::Absent:return "absent";case IntegrityCheck::Unsupported:return "unsupported";case IntegrityCheck::Truncated:return "truncated";case IntegrityCheck::Failed:return "failed";case IntegrityCheck::Passed:return "passed";}return "unsupported";
+}
+uint8_t professional_crc(const std::array<uint8_t,24>& bytes) {
+ // AES3 Annex B: bytes0..22, LSB transmitted first, all stages initially1.
+ // Reflected x^8+x^4+x^3+x^2+1; both published examples independently tested.
+ uint8_t crc=0xff;
+ for(size_t i=0;i<23;++i){crc^=bytes[i];for(unsigned bit=0;bit<8;++bit)crc=uint8_t((crc>>1)^((crc&1)?0xb8:0));}
+ return crc;
+}
+IntegrityCheck status_crc(const std::array<uint8_t,24>& bytes) {
+ if(!(bytes[0]&1))return IntegrityCheck::NotApplicable;
+ if(bytes[23]==professional_crc(bytes))return IntegrityCheck::Passed;
+ // Section5.2.1 permits minimum implementations without a generated CRCC,
+ // including additional partially implemented fields. Zero alone cannot prove
+ // corruption or distinguish an unimplemented CRC from a corrupted zero.
+ if(bytes[23]==0){bool minimum=bytes[0]==1;for(size_t i=1;i<23;++i)minimum&=bytes[i]==0;return minimum?IntegrityCheck::Absent:IntegrityCheck::NotChecked;}
+ return IntegrityCheck::Failed;
+}
 StatusInfo status_info(const std::array<uint8_t,24>& b) {
  StatusInfo info;info.professional=(b[0]&1)!=0;info.non_audio=(b[0]&2)!=0;
  unsigned maximum=0,code=0;
  if(info.professional){
+  info.expected_crc=professional_crc(b);info.crc=status_crc(b);
   info.channel_mode=b[1]&15;info.audio_fields_reliable=(b[22]&0x10)==0;
-  info.supported=(info.channel_mode==2 || info.channel_mode==8)&&info.audio_fields_reliable;
+  info.supported=(info.channel_mode==2 || info.channel_mode==8)&&info.audio_fields_reliable&&info.crc!=IntegrityCheck::Failed;
   info.stereo=info.channel_mode==2;info.emphasis_code=(b[0]>>2)&7;
   const unsigned rates[]={0,44100,48000,32000};info.sample_rate=rates[b[0]>>6];
   switch(b[2]&7){case 2:maximum=20;break;case 4:maximum=24;break;default:break;}
@@ -50,7 +70,9 @@ std::string interpret_status(const std::array<uint8_t,24>& b) {
   s<<"; sample_coordination="<<unsigned(b[2]&7)<<"; word_length=";
   if(info.word_length)s<<info.word_length;else s<<"unknown (coordination="<<unsigned(b[2]&7)<<", code="<<unsigned((b[2]>>3)&7)<<")";
   s<<"; audio_fields_reliable="<<(info.audio_fields_reliable?"true":"false (bytes 0..5 declared unreliable)");
-  s<<"; status_crc=not checked";return s.str();
+  s<<"; status_crc="<<integrity_name(info.crc)<<"; status_crc_received="<<unsigned(b[23])<<"; status_crc_expected="<<unsigned(info.expected_crc);
+  if(info.crc==IntegrityCheck::NotChecked||info.crc==IntegrityCheck::Absent)s<<" (zero CRCC: minimum/unimplemented or unverified, not a passed check)";
+  return s.str();
  }
  s<<"consumer; ";
  unsigned mode=b[0]>>6;

@@ -89,7 +89,7 @@ struct Decoder::Impl {
     && a.non_audio==b.non_audio && (!a.professional || a.channel_mode==b.channel_mode))mode=a.non_audio?1:0;
   const bool changed_prof=mode>=0 && a.professional!=known_professional;
   if(mode!=content_mode || changed_prof){cancel_burst(at,"Channel status changed");reset_cadence();content_mode=mode;
-   label(base_content(),at,"Confirmed complete, parity-good supported per-channel status blocks (professional CRC not checked)");}
+   label(base_content(),at,"Confirmed complete, parity-good supported per-channel status blocks; professional CRC status is reported separately");}
   known_professional=mode>=0 && a.professional;
   if(mode>=0){known_status[0]=blocks[0].c;known_status[1]=blocks[1].c;known_layouts={a.layout,b.layout};}
   else known_layouts={};
@@ -238,7 +238,7 @@ struct Decoder::Impl {
   if(f.preamble=='B') {
    if(block) {
     if(block_count==384) {
-     for(auto &b:blocks){b.end=last.end;b.interpretation=interpret_status(b.c);if(sink.status)sink.status(b);}
+     for(auto &b:blocks){b.end=last.end;b.crc=status_crc(b.c);b.expected_crc=(b.c[0]&1)?professional_crc(b.c):0;b.interpretation=interpret_status(b.c);if(sink.status)sink.status(b);if(b.crc==IntegrityCheck::Failed)diag(b.start,b.end,"status_crc","Professional channel-status CRCC failed; channel="+std::to_string(b.channel)+"; parity integrity remains separate");}
      confirmed_status(f.start);
     } else partial(f.start,"early block preamble");
    }

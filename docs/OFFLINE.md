@@ -38,3 +38,16 @@ The comparator accepts version-1 JSONL or subframe CSV exports. Supply explicit 
 Positive lag means `B[k + lag_frames] == A[k]`. Reports retain source origins and sample locations; separate captures are not automatically clock-synchronized. Invalid, unknown and missing frame positions remain holes. Integer-frame alignment uses local timestamp steps so small clock-estimation errors do not accumulate into invented missing frames. It never silently resamples.
 
 Silence, repetition, inadequate overlap and tied candidates produce an ambiguous/insufficient-evidence result rather than a fabricated delay. Search work, input frame count, and reported mismatch locations are bounded by options shown in `--help`. Exit **0** means a unique exact compared overlap, **1** means mismatches/holes/ambiguity/insufficient evidence, and **2** means malformed or incompatible input. These results describe relative captured-data alignment, not calibrated clock jitter.
+
+
+## Track changing delay
+
+Use the opt-in windowed mode to inspect a changing path:
+
+    python scripts/compare_streams.py A.jsonl B.jsonl --window-seconds 0.1 --hop-seconds 0.05 --max-lag 128
+
+The fixed-offset command and its schema remain unchanged without this option. A windowed report contains per-window alignment, delay-change candidates, and relative timestamp-drift segments. All windows share the configured work budget; --max-windows also bounds output. Configuration transitions, holes, repeated/silent data and incomplete coverage remain uncertainty barriers. An aligned overlap can still have incomplete_coverage; it cannot make the overall windowed report consistent or support drift through missing observations.
+
+A delay-change candidate requires stable supported plateaus and ordered mapping evidence around the transition. Its interval is a conservative bracket, not an exact insertion position or proof of which device inserted/dropped data. Relative drift uses matched source timestamps and is informational: independent capture origins, clock calibration and correlated overlapping windows limit interpretation. No resampling or filled PCM is introduced.
+
+The standalone report can display this JSON alongside capture evidence; see [capture report usage](REPORT.md). Codec metadata and integrity records are described in [codec support](CODECS.md).

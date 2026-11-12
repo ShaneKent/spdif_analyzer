@@ -15,12 +15,13 @@ void SpdifAnalyzer::WorkerThread(){
  analysis_sink.pcm=[&](const spdif::PcmWindow& p){batch.pcm.push_back(p);};
  spdif::Analysis analysis({double(GetSampleRate()),settings.window_ms/1000.0,0,settings.pcm_bits},analysis_sink);
  const auto publish=[&]{results->PublishAnalysis(batch,analysis.summary(),analysis.current_pcm());};
+ spdif::codec::Inspector codec([&](const spdif::codec::CodecInfo& c){results->Add(c);});
  spdif::Sink sink;
  sink.subframe=[&](const spdif::Subframe& f){results->Add(f);analysis.add(f);publish();};
  sink.status=[&](const spdif::StatusBlock& b){results->Add(b);analysis.add(b);publish();};
  sink.content=[&](const spdif::ContentInfo& c){results->Add(c);analysis.add(c);publish();};
  sink.diagnostic=[&](const spdif::Diagnostic& d){results->Add(d);analysis.add(d);publish();};
- sink.burst=[&](const spdif::BurstEvent& b){results->Add(b);};
+ sink.burst=[&](const spdif::BurstEvent& b){results->Add(b);codec.burst(b);};
  if(settings.nominal && GetSampleRate()<settings.nominal*512u)
   sink.diagnostic(spdif::Diagnostic{0,0,"capture_rate_low","Capture rate is below four samples per half-cell for the manual nominal rate; increase the capture rate."});
  results->PublishSnapshot(input->GetSampleNumber());results->CommitResults();

@@ -1,5 +1,6 @@
 #include "SpdifAnalyzer.h"
 #include "report/Events.h"
+#include "report/CodecEvents.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -8,7 +9,7 @@
 #include <sstream>
 namespace {
 constexpr U8 PreambleType=0,AuxType=1,MainType=2,VType=3,UType=4,CType=5,PType=6,SampleType=7;
-constexpr U8 StatusType=1,DiagnosticType=2,ContentType=3,HealthType=4,ChangeType=5,PcmType=6;
+constexpr U8 StatusType=1,DiagnosticType=2,ContentType=3,HealthType=4,ChangeType=5,PcmType=6,CodecType=7;
 std::string hex(uint64_t value,int width){ std::ostringstream s; s<<"0x"<<std::uppercase<<std::hex<<std::setw(width)<<std::setfill('0')<<value; return s.str(); }
 int32_t signed_sample(uint32_t raw){ const auto p=raw&0xffffff;return (p&0x800000)?int32_t(p)-0x1000000:int32_t(p); }
 char preamble(const Frame& f){return char(f.mData2&255);}
@@ -70,6 +71,11 @@ void SpdifResults::Add(const spdif::BurstEvent& event){
  if(event.phase==spdif::BurstPhase::Begin){BurstRecord record;record.begin=event;record.first_payload=first;burst_records.push_back(record);}
  else if(!burst_records.empty()&&!burst_records.back().closed){auto& record=burst_records.back();if(event.phase==spdif::BurstPhase::Word)++record.words;else{record.end=event;record.closed=true;}}
 }
+void SpdifResults::Add(const spdif::codec::CodecInfo& c){
+ std::lock_guard<std::mutex> lock(mutex);
+ metadata_end=std::max(metadata_end,U64(c.transport.end));codec_events.push_back(c);
+ if(pending.size()<7)pending.push_back({CodecType,codec_events.size()-1});else ++suppressed_notifications;
+}
 void SpdifResults::PublishAnalysis(SpdifAnalysisBatch& batch,const spdif::HealthWindow& summary,const std::vector<spdif::PcmWindow>& current){
  std::lock_guard<std::mutex> lock(mutex);
  const auto queue=[&](U8 type,size_t index){if(pending.size()<7)pending.push_back({type,index});else ++suppressed_notifications;};
@@ -84,7 +90,7 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
  // prefix of the next subframe, never overlapping another FrameV2. Their true
  // coverage remains in named fields and the metadata CSV exports.
  U64 cursor=s.start;
- struct Copy { U8 type; spdif::StatusBlock status; spdif::Diagnostic diagnostic; spdif::ContentInfo content;spdif::HealthWindow health;spdif::StatusChange change;spdif::PcmWindow pcm; };
+ struct Copy { U8 type; spdif::StatusBlock status; spdif::Diagnostic diagnostic; spdif::ContentInfo content;spdif::HealthWindow health;spdif::StatusChange change;spdif::PcmWindow pcm;spdif::codec::CodecInfo codec; };
  std::vector<Copy> notifications;
  U64 suppressed=0;
  {
@@ -97,6 +103,7 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
    else if(event.type==DiagnosticType)copy.diagnostic=diagnostics.at(event.index);
    else if(event.type==HealthType)copy.health=health_windows.at(event.index);
    else if(event.type==ChangeType)copy.change=status_changes.at(event.index);
+   else if(event.type==CodecType)copy.codec=codec_events.at(event.index);
    else copy.pcm=pcm_windows.at(event.index);
    notifications.push_back(std::move(copy));
   }
@@ -106,13 +113,22 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
  // separate SDK thread and can otherwise invert metadata/SDK lock ordering.
  for(const auto& event:notifications){
   FrameV2 v;
-  if(event.type==StatusType){
+  if(event.type==CodecType){
+   const auto& c=event.codec;const auto& f=c.frame;
+   v.AddString("codec",spdif::codec::codec_name(f.codec));v.AddString("packing",spdif::codec::packing_name(f.packing));v.AddString("header_state",spdif::codec::header_state_name(f.header));
+   v.AddInteger("sample_rate_hz",f.sample_rate);v.AddInteger("channels",f.channels);v.AddBoolean("channel_count_known",f.channel_count_known);v.AddInteger("frame_bytes",f.frame_bytes);v.AddInteger("samples_per_frame",f.samples_per_frame);
+   v.AddString("structure",spdif::integrity_name(f.structure));v.AddString("crc1",spdif::integrity_name(f.crc1));v.AddString("header_crc",spdif::integrity_name(f.header_crc));v.AddString("frame_crc",spdif::integrity_name(f.frame_crc));
+   v.AddBoolean("transport_complete",c.transport.complete);v.AddBoolean("transport_integrity",c.transport.integrity);v.AddBoolean("transport_conflict",f.transport_conflict);
+   v.AddString("channel_configuration",f.channel_configuration.c_str());if(f.bit_rate)v.AddInteger("bit_rate",*f.bit_rate);
+   v.AddInteger("coverage_start_sample",c.start);v.AddInteger("coverage_end_sample",c.end);v.AddBoolean("source_interval_known",c.source_interval_known);
+   const auto record=spdif::json::record(c);v.AddString("json",record.c_str());AddFrameV2(v,"codec_frame",cursor,cursor);
+  }else if(event.type==StatusType){
    const auto& b=event.status;
    const auto info=spdif::status_info(b.c);const bool stereo=b.integrity&&info.supported&&info.stereo;
    v.AddString("channel",stereo?(b.channel?"B / right":"A / left"):(b.channel?"B":"A"));
    v.AddByteArray("C",b.c.data(),b.c.size());v.AddByteArray("U",b.u.data(),b.u.size());
    v.AddInteger("coverage_start_sample",b.start);v.AddInteger("coverage_end_sample",b.end);
-   v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddBoolean("audio_fields_reliable",spdif::status_info(b.c).audio_fields_reliable);v.AddString("interpretation",b.interpretation.c_str());
+   v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddString("status_crc",spdif::integrity_name(spdif::status_crc(b.c)));v.AddInteger("status_crc_received",b.c[23]);v.AddInteger("status_crc_expected",(b.c[0]&1)?spdif::professional_crc(b.c):0);v.AddBoolean("audio_fields_reliable",spdif::status_info(b.c).audio_fields_reliable);v.AddString("interpretation",b.interpretation.c_str());
    AddFrameV2(v,"channel_status",cursor,cursor);
   }else if(event.type==ContentType){
    const auto& c=event.content;

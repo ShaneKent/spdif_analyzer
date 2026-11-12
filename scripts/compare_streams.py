@@ -11,10 +11,13 @@ Exit: 0 unique exact overlap; 1 mismatch/holes/ambiguity/insufficient evidence;
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
+from copy import copy
+from math import ceil, log2
 from math import gcd
 import csv
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, getcontext
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_FLOOR, getcontext
 import json
 from pathlib import Path
 import sys
@@ -73,6 +76,7 @@ class Row:
     bits: int | None
     measured: Decimal | None
     sample: str | None
+    declared: Decimal | None = None
 
 
 @dataclass
@@ -83,6 +87,8 @@ class Source:
     origin: str
     capture: str | None
     override_bits: int | None = None
+    declarations: list = field(default_factory=list)
+    nominal: Decimal | None = None
 
 
 def selected(time, args):
@@ -90,7 +96,7 @@ def selected(time, args):
             (args.end_seconds is None or time < args.end_seconds))
 
 
-def add_row(rows, time, channel, raw, pcm, valid, bits, measured, sample, args):
+def add_row(rows, time, channel, raw, pcm, valid, bits, measured, sample, args, declared=None):
     if not selected(time, args):
         return
     if channel not in (0, 1) or not 0 <= raw < (1 << 28):
@@ -101,13 +107,14 @@ def add_row(rows, time, channel, raw, pcm, valid, bits, measured, sample, args):
         raise InputError("Subframe timestamps must be monotonic")
     if len(rows) >= 2 * args.max_frames:
         raise InputError("Selected input exceeds --max-frames; select a shorter time interval")
-    rows.append(Row(time, channel, raw, pcm, valid, bits, measured, sample))
+    rows.append(Row(time, channel, raw, pcm, valid, bits, measured, sample, declared))
 
 
 def load(path, args):
     rows, rates = [], set()
     origin, capture = "trigger-relative CSV seconds", None
     override_bits = None
+    declarations, nominal = [], None
     with open(path, encoding="utf-8-sig", newline="") as stream:
         first = next((line.lstrip() for line in stream if line.strip()), "")
         stream.seek(0)
@@ -139,6 +146,7 @@ def load(path, args):
                             raise InputError("Metadata PCM override must be 16..24 bits")
                         if decimal(item.get("nominal_rate_hz", 0)) > 0:
                             rates.add(decimal(item["nominal_rate_hz"]))
+                            nominal = decimal(item["nominal_rate_hz"])
                     elif event in ("subframe", "channel_status"):
                         if metadata is None:
                             raise InputError("JSONL requires initial metadata with capture rate/origin")
@@ -188,6 +196,7 @@ def load(path, args):
                     if prior:
                         rates.add(max(prior, key=lambda s: s[1])[2])
                     rates.update(s[2] for s in channel_records if s[0] <= hi and s[1] >= lo)
+            declarations = statuses + list(prior_status.values())
         else:
             reader = csv.DictReader(stream)
             required = {"start_seconds", "channel", "raw_slots_4_31", "content", "parity_ok", "V_invalid"}
@@ -206,15 +215,20 @@ def load(path, args):
                         for key in ("declared_sample_rate_hz", "nominal_rate_hz"):
                             if item.get(key) not in (None, "", "0"):
                                 rates.add(decimal(item[key]))
+                    declared = {decimal(item[k]) for k in ("declared_sample_rate_hz", "nominal_rate_hz")
+                                if selected(time, args) and pcm and item.get(k) not in (None, "", "0")}
+                    if len(declared) > 1:
+                        raise InputError("Conflicting nominal rate fields in CSV row")
+                    row_rate = next(iter(declared), None)
                     measured = item.get("measured_sample_rate_hz")
                     add_row(rows, time, channel, integer(item["raw_slots_4_31"]), pcm,
                             boolean(item["parity_ok"]) and not boolean(item["V_invalid"]), bits,
-                            decimal(measured) if measured else None, None, args)
+                            decimal(measured) if measured else None, None, args, row_rate)
                 except (KeyError, TypeError, ValueError) as exc:
                     raise InputError(f"{path}:{line_no}: {exc}") from exc
     if not rows or not any(row.pcm for row in rows):
         raise InputError(f"{path}: selected interval has no confirmed PCM")
-    return Source(str(path), rows, rates, origin, capture, override_bits)
+    return Source(str(path), rows, rates, origin, capture, override_bits, declarations, nominal)
 
 
 def config(source, args):
@@ -403,10 +417,20 @@ def candidate(a, b, lag, bounds):
             "hole_frames": max(0, high - low + 1 - compared)}, low, high
 
 
-def compare(a, b, args):
+def charge(budget, amount):
+    if amount > budget[0]:
+        raise InputError("Windowed analysis exceeds shared --max-work; narrow the interval/lag or increase the budget")
+    budget[0] -= amount
+
+
+def compare(a, b, args, shared_budget=None):
+    if shared_budget is not None:
+        charge(shared_budget, len(a) + len(b))
     if min(sum(v[0] is not None for v in a.values()), sum(v[0] is not None for v in b.values())) < args.min_overlap:
         return {"status": "insufficient_evidence", "reason": "Too few valid paired PCM frames for minimum overlap"}, 1
     probes = len(a) * (2 * args.max_lag + 1)
+    if shared_budget is not None:
+        charge(shared_budget, probes + 2 * len(a))
     if probes > args.max_work:
         raise InputError(f"Search requires {probes} pair probes, above --max-work; narrow interval/lag or explicitly increase budget")
     best, ties, total_ties = None, [], 0
@@ -445,7 +469,7 @@ def compare(a, b, args):
                                        "a_start_seconds": str(pair_a[0].time), "b_start_seconds": str(pair_b[0].time),
                                        "a_start_sample": pair_a[0].sample, "b_start_sample": pair_b[0].sample})
     constant = all(value == values[0] for value in values) or all(value == other_values[0] for value in other_values)
-    periodicity_budget = [args.max_work - probes]
+    periodicity_budget = shared_budget if shared_budget is not None else [args.max_work - probes]
     # Audit the full selected sources as well as the winning overlap: an edge
     # lag can otherwise crop a two-cycle source down to one unique-looking cycle.
     intervals = [(a, min(a), max(a)), (b, min(b), max(b))]
@@ -479,6 +503,363 @@ def compare(a, b, args):
             "locations_truncated": score["mismatch_frames"] > len(mismatch_locations)}, 0 if exact else 1
 
 
+
+class WindowSource:
+    """One bounded parsed source, with reusable timelines per configuration epoch."""
+    def __init__(self, source, args, budget):
+        self.source, self.args, self.budget = source, args, budget
+        charge(budget, 3 * len(source.rows) + 2 * len(source.declarations))
+        self.times = [row.time for row in source.rows]
+        self.declarations = {}
+        boundaries = set()
+        for channel in (0, 1):
+            records = sorted((d for d in source.declarations if d[3] == channel), key=lambda d: (d[0], d[1]))
+            for previous, current in zip(records, records[1:]):
+                if current[0] <= previous[1]:
+                    raise InputError("Windowed comparison requires nonoverlapping per-channel status coverage")
+                if current[2] != previous[2]:
+                    boundaries.add(current[0])
+            self.declarations[channel] = (records, [d[0] for d in records])
+        widths, rates, measured = {}, {}, {}
+        for row in source.rows:
+            if row.pcm:
+                width = row.bits or args.bits or source.override_bits
+                if width is not None:
+                    if row.channel in widths and widths[row.channel] != width:
+                        boundaries.add(row.time)
+                    widths[row.channel] = width
+                if row.declared is not None:
+                    if row.channel in rates and rates[row.channel] != row.declared:
+                        boundaries.add(row.time)
+                    rates[row.channel] = row.declared
+            if row.measured is not None and row.measured > 0:
+                old = measured.get(row.channel)
+                if old is not None and abs(row.measured / old - 1) > Decimal("0.02"):
+                    boundaries.add(row.time)
+                measured[row.channel] = row.measured
+        final = source.rows[-1]
+        end_rate = final.measured or args.rate or source.nominal
+        if end_rate is None:
+            record = self.declarations[final.channel][0]
+            end_rate = record[-1][2] if record else final.declared
+        if end_rate is None or end_rate <= 0:
+            raise InputError("Windowed input needs a nominal rate or sampled timing to determine its observed end")
+        self.end = final.time + Decimal(1) / (2 * end_rate)
+        self.boundaries = sorted(t for t in boundaries if self.times[0] < t < self.end)
+        self.edges = [self.times[0], *self.boundaries, self.end]
+        self.cached = None
+
+    def view(self, low, high):
+        left, right = bisect_left(self.times, low), bisect_left(self.times, high)
+        charge(self.budget, right - left + 2 * max(1, ceil(log2(len(self.times) + 1))))
+        rows = self.source.rows[left:right]
+        if not rows:
+            raise InputError("No observations in this time window")
+        rates = {self.source.nominal} if self.source.nominal is not None else set()
+        if self.source.capture is None:
+            rates.update(row.declared for row in rows if row.pcm and row.declared is not None)
+        else:
+            for records, starts in self.declarations.values():
+                pos = max(0, bisect_right(starts, rows[0].time) - 1)
+                while pos < len(records) and records[pos][0] <= rows[-1].time:
+                    rates.add(records[pos][2]);pos += 1
+                    charge(self.budget, 1)
+        return Source(self.source.path, rows, rates, self.source.origin,
+                      self.source.capture, self.source.override_bits)
+
+    def epoch(self, low, high):
+        pos = bisect_right(self.boundaries, low)
+        if bisect_left(self.boundaries, high) != pos:
+            raise InputError("Window or lag halo crosses a rate/layout boundary")
+        return pos
+
+    def frames(self, epoch, rate, widths, is_b):
+        key = epoch, rate, widths, is_b
+        if self.cached is not None and self.cached[0] == key:
+            return self.cached[1:]
+        lo, hi = self.edges[epoch:epoch + 2]
+        left, right = bisect_left(self.times, lo), bisect_left(self.times, hi)
+        rows = self.source.rows[left:right]
+        charge(self.budget, 4 * len(rows))
+        source = Source(self.source.path, rows, {rate}, self.source.origin,
+                        self.source.capture, self.source.override_bits)
+        local_args = copy(self.args)
+        local_args.source_b = source if is_b else None
+        frames = timeline(source, rate, widths, local_args)
+        indices = sorted(frames)
+        times = [min(row.time for row in frames[index][1] if row is not None) for index in indices]
+        self.cached = key, frames, indices, times
+        return frames, indices, times
+
+
+def median(values):
+    values = sorted(values)
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+
+
+def window_timing(a, b, lag, budget):
+    offsets, references, locations = [], [], []
+    charge(budget, len(a))
+    for index, (value, pair) in a.items():
+        other = b.get(index + lag)
+        if value is not None and other is not None and value == other[0]:
+            references.append(pair[0].time)
+            offsets.append(other[1][0].time - pair[0].time)
+            locations.append((pair[0].sample, other[1][0].sample))
+    if not offsets:
+        return {}
+    charge(budget, 2 * len(offsets) * max(1, ceil(log2(len(offsets) + 1))))
+    return {"matched_time_reference_seconds": str(median(references)),
+            "matched_time_offset_seconds": str(median(offsets)),
+            "matched_time_offset_range_seconds": str(max(offsets) - min(offsets)),
+            "exact_timing_pairs": len(offsets),
+            "first_matched_A_sample": locations[0][0], "last_matched_A_sample": locations[-1][0],
+            "first_matched_B_sample": locations[0][1], "last_matched_B_sample": locations[-1][1]}
+
+
+def drift_fit(group, rate):
+    xs = [decimal(w["matched_time_reference_seconds"]) for w in group]
+    ys = [decimal(w["matched_time_offset_seconds"]) for w in group]
+    mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+    denominator = sum((x - mean_x) ** 2 for x in xs)
+    if denominator == 0:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denominator
+    residual = (sum((y - mean_y - slope * (x - mean_x)) ** 2 for x, y in zip(xs, ys)) / len(xs)).sqrt()
+    return {"first_window": group[0]["index"], "last_window": group[-1]["index"],
+            "support_windows": [w["index"] for w in group], "lag_frames": group[0]["lag_frames"],
+            "rate_hz": str(rate), "time_span_seconds": str(xs[-1] - xs[0]),
+            "relative_drift_ppm": str(slope * 1000000), "residual_seconds": str(residual),
+            "sign_convention": "Positive means matched B timestamps gain time relative to A",
+            "evidence": "Regression of exact-match stereo-frame timestamp offsets; overlapping windows are correlated; not calibrated oscillator accuracy or jitter"}
+
+
+def window_edges_covered(indices, times, first, stop, low, high, rate):
+    """Conservatively require observations through both reference window edges.
+
+    Neighbouring observed positions retain known holes at a window boundary.
+    Local timestamp differences avoid a new absolute-grid anchor under drift.
+    The existing timeline timing tolerance permits small clock/quantization
+    differences; unsupported edge coverage must never certify a full window.
+    """
+    if first >= stop:
+        return False
+    tolerance = Decimal('0.01')
+    if first:
+        steps = max(1, int(((low - times[first - 1]) * rate - tolerance).to_integral_value(rounding=ROUND_CEILING)))
+        if indices[first] > indices[first - 1] + steps:
+            return False
+    elif (times[first] - low) * rate > 1 + tolerance:
+        return False
+    if stop < len(indices):
+        steps = max(1, int(((times[stop] - high) * rate + tolerance).to_integral_value(rounding=ROUND_FLOOR)) + 1)
+        if indices[stop - 1] < indices[stop] - steps:
+            return False
+    elif (high - times[stop - 1]) * rate > 1 + tolerance:
+        return False
+    return True
+
+
+def windowed(a, b, args):
+    budget = [args.max_work]
+    source_a, source_b = WindowSource(a, args, budget), WindowSource(b, args, budget)
+    start = args.start_seconds if args.start_seconds is not None else a.rows[0].time
+    end = args.end_seconds if args.end_seconds is not None else source_a.end
+    if end <= start:
+        raise InputError("No observed duration for windowed analysis")
+    width, hop = args.window_seconds, args.hop_seconds
+    tail_anchor = None
+    if end - start <= width:
+        starts = [start]
+    else:
+        # Check before Decimal floor division: an arbitrarily tiny positive hop
+        # must give a bounded-input error, not overflow the decimal quotient.
+        if end - start - width >= hop * args.max_windows:
+            raise InputError("Window count exceeds --max-windows; increase hop or select a shorter interval")
+        count = (end - start - width) // hop + 1
+        if count > args.max_windows:
+            raise InputError("Window count exceeds --max-windows; increase hop or select a shorter interval")
+        starts = [start + i * hop for i in range(int(count))]
+        if starts[-1] + width < end:
+            starts.append(end - width)
+            tail_anchor = len(starts) - 1
+    if len(starts) > args.max_windows:
+        raise InputError("Window count exceeds --max-windows")
+    windows, internals = [], []
+    for number, low in enumerate(starts):
+        high = min(end, low + width)
+        record = {"index": number, "start_seconds": str(low), "end_seconds_exclusive": str(high),
+                  "center_seconds": str((low + high) / 2), "partial": high < low + width,
+                  "tail_anchored": number == tail_anchor}
+        state = None
+        try:
+            epoch_a = source_a.epoch(low, high)
+            view_a = source_a.view(low, high)
+            rate, widths_a = config(view_a, args)
+            halo = Decimal(args.max_lag) / rate
+            epoch_b = source_b.epoch(low - halo, high + halo)
+            view_b = source_b.view(low - halo, high + halo)
+            rate_b, widths_b = config(view_b, args)
+            if (rate, widths_a) != (rate_b, tuple(reversed(widths_b)) if args.swap_b else widths_b):
+                raise InputError("Inputs have incompatible rates/layouts in this window")
+            all_a, indices_a, times_a = source_a.frames(epoch_a, rate, widths_a, False)
+            all_b, indices_b, _ = source_b.frames(epoch_b, rate_b, widths_b, True)
+            pos_a, stop_a = bisect_left(times_a, low), bisect_left(times_a, high)
+            selected_a = indices_a[pos_a:stop_a]
+            if not selected_a:
+                raise InputError("No frame positions in this window")
+            minimum, maximum = selected_a[0], selected_a[-1]
+            pos_b, stop_b = bisect_left(indices_b, minimum - args.max_lag), bisect_right(indices_b, maximum + args.max_lag)
+            charge(budget, len(selected_a) + stop_b - pos_b)
+            frames_a = {i: all_a[i] for i in selected_a}
+            frames_b = {i: all_b[i] for i in indices_b[pos_b:stop_b]}
+            if not frames_b:
+                raise InputError("No potentially aligned B frame positions in this window")
+            local_args = copy(args);local_args.rate_resolved = rate
+            score, _ = compare(frames_a, frames_b, local_args, budget)
+            record.update(score)
+            record.update({"rate_hz": str(rate), "channel_bits": list(widths_a),
+                           "a_epoch": epoch_a, "b_epoch": epoch_b,
+                           "observed_A_frames": len(frames_a), "valid_A_frames": sum(v[0] is not None for v in frames_a.values()),
+                           "observed_B_frames": len(frames_b), "valid_B_frames": sum(v[0] is not None for v in frames_b.values())})
+            if "lag_frames" in record:
+                record.update(window_timing(frames_a, frames_b, record["lag_frames"], budget))
+            clean = (record.get("status") == "aligned" and record.get("compared_frames") == len(selected_a)
+                     and selected_a[-1] - selected_a[0] + 1 == len(selected_a)
+                     and window_edges_covered(indices_a, times_a, pos_a, stop_a, low, high, rate))
+            record["continuous_full_window_evidence"] = clean
+            if record.get("status") == "aligned" and not clean:
+                record["alignment_status"] = "aligned"
+                record["status"] = "incomplete_coverage"
+                record["reason"] = "Aligned compared overlap does not establish continuous coverage of the full reference window"
+            state = {"a": all_a, "b": all_b, "a_indices": indices_a,
+                     "a_left": pos_a, "a_right": stop_a, "b_indices": indices_b, "rate": rate,
+                     "key": (rate, widths_a, epoch_a, epoch_b), "clean": clean}
+        except InputError as error:
+            if "--max-work" in str(error):
+                raise
+            record.update({"status": "incompatible_interval", "reason": str(error)})
+        windows.append(record);internals.append(state)
+    drifts, group, last_key = [], [], None
+    for record, state in zip(windows, internals):
+        key = (state["key"], record.get("lag_frames")) if state and state["clean"] else None
+        if key != last_key or key is None:
+            if len(group) >= 3:
+                result = drift_fit(group, decimal(group[0]["rate_hz"]))
+                if result is not None:drifts.append(result)
+            group = []
+        if key is not None:group.append(record)
+        last_key = key
+    if len(group) >= 3:
+        result = drift_fit(group, decimal(group[0]["rate_hz"]))
+        if result is not None:drifts.append(result)
+    candidates = delay_candidates(windows, internals, args, budget)
+    clean_lags = {w["lag_frames"] for w in windows if w.get("status") == "aligned"}
+    passed = all(w["status"] == "aligned" and w.get("continuous_full_window_evidence", False) for w in windows) and len(clean_lags) == 1
+    report = {"mode": "windowed", "status": "consistent" if passed else "changes_or_uncertainty",
+              "window_seconds": str(width), "hop_seconds": str(hop), "windows": windows,
+              "delay_change_candidates": candidates, "drift_segments": drifts,
+              "work_used": args.max_work - budget[0], "work_limit": args.max_work,
+              "sources": [{"path": source.path, "origin": source.origin, "capture_rate_hz": source.capture}
+                          for source in (a, b)],
+              "timing_note": "Matched stereo-frame timestamp offsets; independent origins and capture clocks are not calibrated; drift is informational, not a failure threshold"}
+    return report, 0 if passed else 1
+
+
+def delay_candidates(windows, states, args, budget):
+    """Plateau-backed hypotheses; never assign a unique lag inside a transition."""
+    plateaus = []
+    for i, (record, state) in enumerate(zip(windows, states)):
+        if not state or not state["clean"]:
+            continue
+        key = state["key"], record["lag_frames"]
+        if plateaus and plateaus[-1]["last"] == i - 1 and plateaus[-1]["key"] == key:
+            plateaus[-1]["last"] = i
+        else:
+            plateaus.append({"first": i, "last": i, "key": key})
+    output = []
+    for before, after in zip(plateaus, plateaus[1:]):
+        if before["last"] - before["first"] < 1 or after["last"] - after["first"] < 1:
+            continue
+        left, right = before["last"], after["first"]
+        old, new = windows[left]["lag_frames"], windows[right]["lag_frames"]
+        if old == new or states[left]["key"] != states[right]["key"]:
+            continue
+        transition = range(left + 1, right)
+        usable = True
+        observations = {}
+        # Full plateau boundary windows also constrain transition direction.
+        for i in range(left, right + 1):
+            state = states[i]
+            if not state or state["key"] != states[left]["key"]:
+                usable = False;break
+            a, b = state["a"], state["b"]
+            keys = state["a_indices"][state["a_left"]:state["a_right"]]
+            charge(budget, len(keys))
+            selected = {index: a[index] for index in keys}
+            if sum(v[0] is not None for v in selected.values()) < args.min_overlap:
+                usable = False;break
+            if not keys or keys[-1] - keys[0] + 1 != len(selected) or any(v[0] is None for v in selected.values()):
+                usable = False;break
+            # A missing/faulty interval inside an insertion-shaped B span is
+            # not evidence of inserted PCM, even if neither endpoint mapping
+            # happens to address that interval (large delay steps can skip it).
+            b_low, b_high = min(keys[0] + old, keys[0] + new), max(keys[-1] + old, keys[-1] + new)
+            b_left, b_right = bisect_left(state["b_indices"], b_low), bisect_right(state["b_indices"], b_high)
+            if b_right - b_left != b_high - b_low + 1:
+                usable = False;break
+            charge(budget, 2 * (b_right - b_left))
+            if any(b[index][0] is None for index in state["b_indices"][b_left:b_right]):
+                usable = False;break
+            for position in keys:
+                charge(budget, 2)
+                value = a[position][0]
+                old_b, new_b = b.get(position + old), b.get(position + new)
+                if old_b is None or new_b is None or old_b[0] is None or new_b[0] is None:
+                    usable = False;break
+                flags = value == old_b[0], value == new_b[0]
+                observations[position] = flags
+            if not usable:break
+            # Repetition is an intrinsic barrier even when a transition has no
+            # qualifying fixed-lag winner. Audit original positions directly.
+            if indexed_period(selected, min(selected), max(selected), budget, args.min_overlap):
+                usable = False;break
+        if not usable or len(observations) < 2 * args.min_overlap:
+            continue
+        # A single ordered old->new split must explain the observations. Missing
+        # values and arbitrary alternating unions cannot manufacture a step.
+        entries = sorted(observations.items())
+        old_prefix = 0
+        new_suffix = sum(flags[1] for _, flags in entries)
+        best = None
+        for split in range(len(entries) + 1):
+            charge(budget, 1)
+            explained = old_prefix + new_suffix
+            if old_prefix >= args.min_overlap and new_suffix >= args.min_overlap and (
+                    best is None or explained > best[0]):
+                best = explained, split, old_prefix, new_suffix
+            if split < len(entries):
+                old_prefix += entries[split][1][0]
+                new_suffix -= entries[split][1][1]
+        if best is None or Decimal(best[0]) / len(entries) < args.min_match:
+            continue
+        delta = new - old
+        output.append({"kind": "sample_insertion_or_drop_candidate", "old_lag_frames": old,
+                       "new_lag_frames": new, "delta_frames": delta,
+                       "support_windows_before": list(range(before["first"], before["last"] + 1)),
+                       "support_windows_after": list(range(after["first"], after["last"] + 1)),
+                       "transition_windows": list(transition),
+                       "interval_start_seconds": windows[left]["start_seconds"],
+                       "interval_end_seconds_exclusive": windows[right]["end_seconds_exclusive"],
+                       "explained_frames": best[0], "unexplained_frames": len(entries)-best[0], "observed_frames": len(entries),
+                       "old_mapping_support": best[2], "new_mapping_support": best[3],
+                       "ordered_single_transition_supported": True,
+                       "explanation": "B gained delay relative to A; B insertion, A drop, or buffering are candidates" if delta > 0 else "B lost delay relative to A; B drop, A insertion, or buffering are candidates",
+                       "certainty": "Candidate explanation with a conservative interval, not a proven cause or exact insertion position"})
+    return output
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("a", type=Path);p.add_argument("b", type=Path)
@@ -492,6 +873,9 @@ def parser():
     p.add_argument("--max-mismatches", type=int, default=100, help="Cap mismatch locations and hole ranges in output (counts remain exact)")
     p.add_argument("--max-work", type=int, default=20_000_000)
     p.add_argument("--max-frames", type=int, default=1_000_000)
+    p.add_argument("--window-seconds", type=decimal, help="Opt in to time-indexed delay/drift analysis")
+    p.add_argument("--hop-seconds", type=decimal, help="Window hop; default is half the window")
+    p.add_argument("--max-windows", type=int, default=1000, help="Bound windowed report size")
     return p
 
 
@@ -501,6 +885,15 @@ def main(argv=None):
             0 <= args.max_mismatches <= 10000 and 1 <= args.max_work <= 1_000_000_000 and
             1 <= args.max_frames <= 10_000_000 and 0 <= args.min_match <= 1):
         p.error("Invalid search/report bounds (see --help)")
+    if args.window_seconds is None and args.hop_seconds is not None:
+        p.error("--hop-seconds requires --window-seconds")
+    if args.window_seconds is not None:
+        if args.window_seconds <= 0 or not 1 <= args.max_windows <= 10000:
+            p.error("Window must be positive and --max-windows must be 1..10000")
+        if args.hop_seconds is None:
+            args.hop_seconds = args.window_seconds / 2
+        if not 0 < args.hop_seconds <= args.window_seconds:
+            p.error("Window hop must be positive and no greater than the window")
     if args.start_seconds is not None and args.end_seconds is not None and args.end_seconds <= args.start_seconds:
         p.error("--end-seconds must follow --start-seconds")
     base = {"schema_version": 1, "lag_convention": "B[k + lag_frames] == A[k]",
@@ -510,6 +903,10 @@ def main(argv=None):
             "timeline_policy": "Indices use each export origin and first observed phase, including invalid/unknown samples; adjacent frame steps retain holes. Different capture origins are not automatically synchronized."}
     try:
         a = load(args.a, args);b = load(args.b, args);args.source_b = b
+        if args.window_seconds is not None:
+            report, status = windowed(a, b, args)
+            print(json.dumps({**base, **report}, separators=(",", ":")))
+            return status
         rate_a, bits_a = config(a, args);rate_b, bits_b = config(b, args)
         if (rate_a, bits_a) != (rate_b, tuple(reversed(bits_b)) if args.swap_b else bits_b):
             raise InputError("Inputs have incompatible nominal rates or declared PCM widths; no resampling is performed")

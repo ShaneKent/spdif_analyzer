@@ -173,6 +173,10 @@ struct Analysis::Impl {
  void add(const StatusBlock& block){running();if(block.channel>1||block.end<block.start)throw std::invalid_argument("invalid status block");
   const auto at=block.end;auto& b=bucket(std::max(at,config.origin));
   auto& channel=b.channels[block.channel];auto& all=total.channels[block.channel];
+  const auto info=status_info(block.c);
+  if(info.crc==IntegrityCheck::Passed){++channel.status_crc_passed;++all.status_crc_passed;}
+  else if(info.crc==IntegrityCheck::Failed){++channel.status_crc_failed;++all.status_crc_failed;fault(channel,block.start,block.end);fault(all,block.start,block.end);}
+  else if(info.professional){++channel.status_crc_unverified;++all.status_crc_unverified;}
   if(block.integrity){++channel.status_good;++all.status_good;}else{++channel.status_damaged;++all.status_damaged;
    // Do not replace a precise observed parity location with its entire status
    // block interval. Status-only inputs still expose the known affected range.
@@ -182,7 +186,7 @@ struct Analysis::Impl {
   // Structural/parity integrity remains visible in health, but professional
   // audio-field reliability is separate evidence. Never compare interpretations
   // through a block which explicitly disclaims bytes 0..5.
-  if(!status_info(block.c).audio_fields_reliable){have_status[ch]=false;pcm_flush(ch);metadata_observed(at);return;}
+  if(!info.audio_fields_reliable||info.crc==IntegrityCheck::Failed){have_status[ch]=false;pcm_flush(ch);metadata_observed(at);return;}
   if(have_status[ch] && baseline[ch].end!=UINT64_MAX && baseline[ch].end+1==block.start && baseline[ch].c!=block.c){
    StatusChange change;change.channel=ch;change.previous_start=baseline[ch].start;change.previous_end=after(baseline[ch].end);
    change.start=block.start;change.end=after(block.end);change.previous=baseline[ch].c;change.current=block.c;
@@ -201,7 +205,7 @@ struct Analysis::Impl {
  }
  void add(const Diagnostic& d){running();auto& b=bucket(std::max(d.end,config.origin));
   if(d.code=="sync_loss"){++b.sync_losses;++total.sync_losses;for(unsigned ch=0;ch<2;++ch){++b.channels[ch].sync_losses;++total.channels[ch].sync_losses;}}
-  if(d.code!="searching"&&d.code!="parity"&&d.code!="incomplete_status"&&d.code!="truncated"&&d.code!="burst_overlap_candidate"&&d.code!="notification_summary"){for(unsigned ch=0;ch<2;++ch){fault(b.channels[ch],d.start,d.end);fault(total.channels[ch],d.start,d.end);}}
+  if(d.code!="searching"&&d.code!="parity"&&d.code!="status_crc"&&d.code!="incomplete_status"&&d.code!="truncated"&&d.code!="burst_overlap_candidate"&&d.code!="notification_summary"){for(unsigned ch=0;ch<2;++ch){fault(b.channels[ch],d.start,d.end);fault(total.channels[ch],d.start,d.end);}}
   if(d.code=="sync_loss"||d.code=="channel_order")clear_continuity();
   else if(d.code=="block_length"){have_status={false,false};for(unsigned ch=0;ch<2;++ch)pcm_flush(ch);}
   else if(d.code=="incomplete_status"){

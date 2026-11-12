@@ -1,5 +1,6 @@
 #pragma once
 #include "core/Decoder.h"
+#include "codec/Codec.h"
 #include <array>
 #include <filesystem>
 #include <functional>
@@ -27,7 +28,7 @@ public:
  explicit BurstWriter(const std::filesystem::path& new_directory);
  ~BurstWriter();
  BurstWriter(const BurstWriter&)=delete;BurstWriter& operator=(const BurstWriter&)=delete;
- void burst(const BurstEvent&);void finish();
+ void burst(const BurstEvent&);void codec(const spdif::codec::CodecInfo&);void finish();
 private:struct Impl;std::unique_ptr<Impl> impl;
 };
 enum class Dataset : unsigned { Subframes,Status,Diagnostics,Content };
@@ -37,7 +38,7 @@ struct CsvSource {
  std::function<void(uint64_t,std::ostream&)> write_row; // Exactly one CSV row, without newline.
 };
 struct BundleSpec {
- std::string analyzer_version="0.2.0",schema_version="1",input_channel;
+ std::string analyzer_version=spdif::analyzer_version,schema_version="1",input_channel;
  double capture_rate=0;
  std::string settings_json="{}"; // Caller-provided JSON object, included verbatim.
  uint64_t coverage_start=0,coverage_end=0; // Inclusive source sample indices.

@@ -226,9 +226,10 @@ static void professional_reliability(){
  check(result.frames.at(372*2).content==spdif::ContentFormat::Unknown&&!result.frames.at(372*2).layout.known,"incoming unreliable bit immediately clears stale evidence");
  check(result.frames.at(400*2).content==spdif::ContentFormat::Unknown,"unreliable confirmed block stays unknown");
  check(result.frames.at(576*2).content==spdif::ContentFormat::Pcm&&result.frames.at(576*2).layout.known,"fresh reliable complete block restores PCM evidence");
- auto addresses=good;addresses[6]=0x41;addresses[14]=1;addresses[18]=2;addresses[22]=0xe0;addresses[23]=0x37;
+ // Independently calculated valid CRCC for these fields (AES3 AnnexB rules).
+ auto addresses=good;addresses[6]=0x41;addresses[14]=1;addresses[18]=2;addresses[22]=0xe0;addresses[23]=0x02;
  result=run(transport(600,{},good,addresses,192));
- check(std::all_of(result.frames.begin()+384,result.frames.end(),[](const spdif::Subframe& f){return f.content==spdif::ContentFormat::Pcm&&f.layout.known&&f.layout.bits==24;}),"professional addresses other reliability flags and unchecked CRC changes keep audio classification continuous");
+ check(std::all_of(result.frames.begin()+384,result.frames.end(),[](const spdif::Subframe& f){return f.content==spdif::ContentFormat::Pcm&&f.layout.known&&f.layout.bits==24;}),"professional addresses other reliability flags and valid CRC changes keep audio classification continuous");
 }
 
 int main(){try{layouts();trusted_layout();streaming();cadence();interleaved_cadence();pending_header_snapshot();professional_reliability();std::cout<<"PASS "<<checks<<" protocol feature checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL "<<checks<<": "<<e.what()<<'\n';return 1;}}

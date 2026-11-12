@@ -283,4 +283,160 @@ class CompareTests(unittest.TestCase):
         self.run_compare(a,a,'--max-work','10',expected=2)
 
 
+    def window_args(self, frames=64, hop=32):
+        return ['--window-seconds',str(Decimal(frames)/RATE),'--hop-seconds',str(Decimal(hop)/RATE)]
+
+    def test_windowed_constant_delay_preserves_fixed_mode(self):
+        values=sequence(384);a=self.jsonl('a.jsonl',values)
+        b=self.jsonl('b.jsonl',[(111,222)]*5+values)
+        report=self.run_compare(a,b,*self.window_args())
+        self.assertEqual(report['mode'],'windowed')
+        self.assertTrue(all(w['lag_frames']==5 for w in report['windows']))
+        self.assertEqual(report['delay_change_candidates'],[])
+        self.assertTrue(report['drift_segments'])
+        for segment in report['drift_segments']:
+            self.assertLess(abs(Decimal(segment['relative_drift_ppm'])),Decimal('0.001'))
+        self.assertTrue(all(isinstance(w['first_matched_A_sample'],str) for w in report['windows']))
+        # Decimal rounding in repeating frame durations must not mark ordinary
+        # hop windows as a special final-window placement.
+        self.assertLessEqual(sum(w['tail_anchored'] for w in report['windows']),1)
+        self.assertFalse(any(w['tail_anchored'] for w in report['windows'][:-1]))
+
+    def test_windowed_inserted_and_dropped_pcm_candidates(self):
+        values=sequence(384);a=self.jsonl('a.jsonl',values)
+        for name,changed,delta in [('insert',[(123,456)]*5+values[:128]+[(777,888)]*3+values[128:],3),
+                                   ('drop',[(123,456)]*5+values[:128]+values[131:],-3)]:
+            b=self.jsonl(name+'.jsonl',changed)
+            report=self.run_compare(a,b,*self.window_args(),expected=1)
+            candidates=report['delay_change_candidates']
+            self.assertTrue(candidates,report)
+            found=next(c for c in candidates if c['delta_frames']==delta)
+            self.assertTrue(found['ordered_single_transition_supported'])
+            self.assertGreaterEqual(found['old_mapping_support'],32)
+            self.assertGreaterEqual(found['new_mapping_support'],32)
+            self.assertLessEqual(Decimal(found['interval_start_seconds']),Decimal(128)/RATE)
+            self.assertGreaterEqual(Decimal(found['interval_end_seconds_exclusive']),Decimal(128)/RATE)
+            self.assertIn('Candidate',found['certainty'])
+            self.assertTrue(any(w['status']!='aligned' for w in report['windows']))
+
+    def test_windowed_large_step_does_not_skip_unobserved_insert_span(self):
+        values=sequence(512);a=self.jsonl('a.jsonl',values)
+        changed=values[:128]+[(30000+i,-30000-i) for i in range(200)]+values[128:]
+        b=self.jsonl('b.jsonl',changed,drop=(220,))
+        report=self.run_compare(a,b,*self.window_args(),'--max-lag','256',expected=1)
+        self.assertEqual(report['delay_change_candidates'],[])
+
+    def test_windowed_long_clock_drift_does_not_reanchor_false_integer_steps(self):
+        values=sequence(25000);a=self.jsonl('a.jsonl',values)
+        b=self.jsonl('b.jsonl',values,clock_ppm=50)
+        report=self.run_compare(a,b,*self.window_args(2048,1024),'--max-lag','0')
+        self.assertTrue(all(w['lag_frames']==0 for w in report['windows']))
+        self.assertEqual(report['delay_change_candidates'],[])
+        self.assertLess(abs(Decimal(report['drift_segments'][0]['relative_drift_ppm'])-50),Decimal('0.1'))
+
+    def test_windowed_timestamp_drift_sign_and_scale(self):
+        values=sequence(768);a=self.jsonl('a.jsonl',values)
+        for ppm in (-200,-50,50,200):
+            b=self.jsonl('drift.jsonl',values,clock_ppm=ppm)
+            report=self.run_compare(a,b,*self.window_args(96,48),'--max-lag','2')
+            self.assertTrue(report['drift_segments'])
+            estimate=Decimal(report['drift_segments'][0]['relative_drift_ppm'])
+            self.assertLess(abs(estimate-ppm),Decimal('1'),(ppm,estimate))
+            self.assertTrue(all(w['lag_frames']==0 for w in report['windows']))
+            self.assertEqual(report['delay_change_candidates'],[])
+
+    def test_windowed_holes_and_faults_are_barriers(self):
+        values=sequence(384);a=self.jsonl('a.jsonl',values)
+        for kwargs in ({'drop':range(140,146)},{'invalid':(150,)},{'unknown':range(140,146)}):
+            b=self.jsonl('holes.jsonl',values,**kwargs)
+            report=self.run_compare(a,b,*self.window_args(),expected=1)
+            self.assertEqual(report['delay_change_candidates'],[])
+            bad={w['index'] for w in report['windows'] if not w.get('continuous_full_window_evidence',False)}
+            self.assertTrue(bad)
+            for fit in report['drift_segments']:
+                self.assertFalse(bad.intersection(fit['support_windows']))
+
+    def test_windowed_edge_drops_in_either_source_are_uncertainty_barriers(self):
+        values=sequence(384);full=self.jsonl('full.jsonl',values)
+        for dropped in (range(64,96), range(96,128), (64,), (127,)):
+            short=self.jsonl('edge-hole.jsonl',values,drop=dropped)
+            for a,b in ((full,short),(short,full)):
+                report=self.run_compare(a,b,*self.window_args(64,64),'--max-lag','0',expected=1)
+                affected=report['windows'][1]
+                self.assertEqual(affected['status'],'incomplete_coverage')
+                self.assertFalse(affected['continuous_full_window_evidence'])
+                self.assertEqual(report['status'],'changes_or_uncertainty')
+                self.assertEqual(report['delay_change_candidates'],[])
+                for fit in report['drift_segments']:
+                    self.assertNotIn(1,fit['support_windows'])
+
+    def test_windowed_clipped_delay_tail_is_explicit(self):
+        values=sequence(384);a=self.jsonl('a.jsonl',values)
+        b=self.jsonl('tail.jsonl',[(111,222)]*5+values[:-5])
+        report=self.run_compare(a,b,*self.window_args(),expected=1)
+        self.assertEqual(report['windows'][-1]['status'],'incomplete_coverage')
+        self.assertEqual(report['windows'][-1]['alignment_status'],'aligned')
+        self.assertFalse(report['windows'][-1]['continuous_full_window_evidence'])
+        # Fixed comparison still accepts its unique, exact observed overlap.
+        self.assertEqual(self.run_compare(a,b)['status'],'aligned')
+
+    def test_windowed_silence_and_repetition_stay_ambiguous(self):
+        for values in ([(0,0)]*384,[(1,2),(3,4)]*192):
+            a=self.jsonl('periodic.jsonl',values)
+            report=self.run_compare(a,a,*self.window_args(),expected=1)
+            self.assertTrue(all(w['status']=='ambiguous' for w in report['windows']))
+            self.assertEqual(report['delay_change_candidates'],[])
+            self.assertEqual(report['drift_segments'],[])
+
+    def test_windowed_layout_boundary_is_explicit_and_resumes(self):
+        values=sequence(384);a=self.jsonl('mixed.jsonl',values,mixed_bits=True)
+        report=self.run_compare(a,a,*self.window_args(),expected=1)
+        self.assertTrue(any(w['status']=='incompatible_interval' for w in report['windows']))
+        self.assertTrue(any(w.get('channel_bits')==[16,16] and w['status']=='aligned' for w in report['windows']))
+        self.assertTrue(any(w.get('channel_bits')==[24,24] and w['status']=='aligned' for w in report['windows']))
+        self.assertEqual(report['delay_change_candidates'],[])
+        for fit in report['drift_segments']:
+            keys={(report['windows'][i]['a_epoch'],report['windows'][i]['b_epoch']) for i in fit['support_windows']}
+            self.assertEqual(len(keys),1)
+
+    def test_windowed_rate_boundary_is_explicit_and_resumes(self):
+        values=sequence(384);path=self.directory/'rate-change.jsonl';rows=[{'schema_version':1,'event':'metadata','capture_rate_hz':CAPTURE,'origin_sample':'0'}]
+        cut=192;boundary=cut*1024
+        for ch in (0,1):
+            for start,end,rate in [(0,boundary-1,RATE),(boundary,boundary+(len(values)-cut)*512-1,96000)]:
+                rows.append({'schema_version':1,'event':'channel_status','start_sample':str(start),'end_sample_inclusive':str(end),'channel':ch,'integrity':True,'supported':True,'non_audio':False,'declared_sample_rate_hz':rate})
+        for i,pair in enumerate(values):
+            rate=RATE if i<cut else 96000;step=1024 if i<cut else 512;base=i*1024 if i<cut else boundary+(i-cut)*512
+            for ch in (0,1):
+                stamp=base+ch*(step//2)
+                rows.append({'schema_version':1,'event':'subframe','start_sample':str(stamp),'end_sample_inclusive':str(stamp+step//2-1),'channel':ch,'raw_slots_4_31':raw(pair[ch]),'parity_ok':True,'V_invalid':False,'sample_rate_hz':rate,'content':'PCM','layout':{'known':True,'bits':16,'stereo':True,'professional':False}})
+        path.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        report=self.run_compare(path,path,*self.window_args(),expected=1)
+        self.assertTrue(any(w['status']=='incompatible_interval' for w in report['windows']))
+        self.assertTrue(any(w.get('rate_hz')=='96000' and w['status']=='aligned' for w in report['windows']))
+        self.assertEqual(report['delay_change_candidates'],[])
+
+    def test_windowed_global_limits_not_per_window_resets(self):
+        values=sequence(512);a=self.jsonl('bounded.jsonl',values)
+        report=self.run_compare(a,a,*self.window_args(),'--max-lag','0')
+        budget=max(1000,report['work_used']//2)
+        self.run_compare(a,a,*self.window_args(),'--max-lag','0','--max-work',str(budget),expected=2)
+        self.run_compare(a,a,*self.window_args(),'--max-lag','0','--max-work',str(budget),'--end-seconds',str(Decimal(64)/RATE))
+        self.run_compare(a,a,*self.window_args(),'--max-windows','2',expected=2)
+        self.run_compare(a,a,*self.window_args(),'--hop-seconds','1e-100',expected=2)
+        self.assertLessEqual(report['work_used'],report['work_limit'])
+
+    def test_windowed_swap_and_negative_csv_origins(self):
+        values=sequence(256);a=self.csv('a.csv',values);b=self.csv('b.csv',[(y,x) for x,y in values])
+        for path in (a,b):
+            with path.open(newline='') as f:rows=list(csv.DictReader(f))
+            for row in rows:row['start_seconds']=str(Decimal(row['start_seconds'])-Decimal('.01'))
+            with path.open('w',newline='') as f:
+                writer=csv.DictWriter(f,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
+        report=self.run_compare(a,b,*self.window_args(),'--rate','48000','--bits','16','--swap-b')
+        self.assertLess(Decimal(report['windows'][0]['start_seconds']),0)
+        self.assertTrue(all(w['lag_frames']==0 for w in report['windows']))
+
+
+
 if __name__=='__main__':unittest.main()

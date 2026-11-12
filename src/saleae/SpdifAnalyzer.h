@@ -4,6 +4,7 @@
 #include <AnalyzerHelpers.h>
 #include "core/Decoder.h"
 #include "analysis/Analysis.h"
+#include "codec/Codec.h"
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -42,6 +43,7 @@ public:
  void Add(const spdif::Diagnostic&);
  void Add(const spdif::ContentInfo&);
  void Add(const spdif::BurstEvent&);
+ void Add(const spdif::codec::CodecInfo&);
  void PublishAnalysis(SpdifAnalysisBatch&,const spdif::HealthWindow&,const std::vector<spdif::PcmWindow>&);
  void PublishSnapshot(U64 observed_sample,const std::optional<spdif::BurstEvent>& pending_header={});
  void GenerateBubbleText(U64,Channel&,DisplayBase) override;
@@ -53,7 +55,7 @@ private:
  struct BurstRecord {spdif::BurstEvent begin{},end{};U64 first_payload=0,words=0;bool closed=false;};
  struct Snapshot {
   U64 frames=0,samples=0,start=0,end=0;
-  size_t status=0,diagnostics=0,content=0,changes=0,pcm=0,health=0,bursts=0;
+  size_t status=0,diagnostics=0,content=0,changes=0,pcm=0,health=0,bursts=0,codecs=0;
   spdif::HealthWindow summary{};std::vector<spdif::PcmWindow> current_pcm;
   std::optional<spdif::BurstEvent> pending_header;
   BurstRecord tail_burst{};
@@ -84,6 +86,7 @@ private:
  std::vector<spdif::PcmWindow> pcm_windows,current_pcm;
  spdif::HealthWindow health_summary{};
  std::vector<BurstRecord> burst_records;
+ std::vector<spdif::codec::CodecInfo> codec_events;
 };
 class SpdifAnalyzer final : public Analyzer2 {
 public:

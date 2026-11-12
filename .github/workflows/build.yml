@@ -28,3 +28,25 @@ jobs:
       - run: cmake -S . -B build -DSPDIF_BUILD_PLUGIN=OFF -DSPDIF_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
+  fuzz-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure instrumented production sources
+        run: cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DSPDIF_BUILD_PLUGIN=OFF -DSPDIF_BUILD_TESTS=OFF -DSPDIF_BUILD_FUZZERS=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build-fuzz --parallel
+      - name: Bounded reproducible fuzz smoke
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-artifacts"
+          for target in edges input codec; do
+            cp -r "tests/fuzz/$target" "$RUNNER_TEMP/corpus-$target"
+            fuzz_max_len=4096
+            if [ "$target" = codec ]; then fuzz_max_len=24569; fi
+            "build-fuzz/fuzz_$target" "$RUNNER_TEMP/corpus-$target" -seed=1 -max_len="$fuzz_max_len" -timeout=2 -rss_limit_mb=512 -max_total_time=10 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: minimized-fuzz-failures
+          path: ${{ runner.temp }}/fuzz-artifacts/
