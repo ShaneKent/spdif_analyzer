@@ -16,7 +16,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MIN_LOGIC = '2.3.43'
-DOCS = ('CODECS.md', 'FEATURES.md', 'INSTALL.md', 'OFFLINE.md', 'PERFORMANCE.md',
+DOCS = ('CODECS.md', 'FEATURES.md', 'HARDWARE.md', 'INSTALL.md', 'OFFLINE.md', 'PERFORMANCE.md',
         'RELEASING.md', 'REPORT.md', 'RESULTS.md', 'VALIDATION.md')
 PRODUCTION_NAMES = {'windows': ('SpdifAnalyzer.dll',),
                     'linux': ('libSpdifAnalyzer.so', 'SpdifAnalyzer.so'),

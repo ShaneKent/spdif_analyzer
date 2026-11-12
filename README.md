@@ -45,6 +45,8 @@ The native Windows DLL is `build-win/Analyzers/Release/SpdifAnalyzer.dll` when u
 
 The default **Fields** view annotates preamble, auxiliary bits, main audio field, validity V, user U, channel status C, and parity P separately at their actual decoded edge boundaries. **Waveform detail → Samples** selects a compact view. A parity failure is attached to the P field; V=1 is explicitly labeled invalid for conversion.
 
+For longer captures, disable **Structured sample rows** to keep the data table focused on status, errors, health and codec metadata. All waveform annotations and subframe CSV rows remain available. Full per-sample table rows stay enabled by default. See the measured [Logic backend costs](docs/PERFORMANCE.md) and [physical AC-3/DTS validation](docs/HARDWARE.md).
+
 PCM identification uses confirmed supported consumer or professional channel status. Compressed-format identification uses IEC 61937 synchronization, type and length information, corroborated by non-audio channel status. Headers without confirmed status are provisional; disagreement with PCM status is a conflict. Codec names describe the transport type, not successful decompression or codec payload validation. See [result definitions](docs/RESULTS.md).
 
 For offline inspection of a Saleae digital transition CSV:
@@ -61,7 +63,7 @@ To repeat the demo application check, configure this analyzer on D0 **before** s
 
 ## Analysis and export selection
 
-Keep **Export output → Selected CSV** for the original CSV workflow. Other choices provide health JSON, status-change JSONL, PCM-statistics JSONL, segmented WAV, IEC61937 payload files, or one bundle containing all four CSV datasets. **Analysis window (ms)** controls summary windows; **PCM bits override** resolves unspecified precision explicitly. WAV rate/stereo overrides are optional and never bypass content, parity, or validity checks.
+Keep **Export output → Selected CSV** for the original CSV workflow. Other choices provide health JSON, status-change JSONL, PCM-statistics JSONL, codec-frame JSONL, segmented WAV, IEC61937 payload files, or one bundle containing all four CSV datasets. **Analysis window (ms)** controls summary windows; **PCM bits override** resolves unspecified precision explicitly. WAV rate/stereo overrides are optional and never bypass content, parity, or validity checks.
 
 New directory exports never overwrite an existing directory and remain marked `INCOMPLETE` after cancellation or I/O failure. Existing settings archives migrate with their original waveform/CSV choices preserved. Details and limitations are in [feature definitions](docs/FEATURES.md).
 

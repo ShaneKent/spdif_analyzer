@@ -30,7 +30,9 @@ The default Fields waveform detail splits each subframe into seven annotations. 
 
 Choose the desired **CSV export** format in the analyzer settings, then use its generic **Export to TXT/CSV** action. The automation API's legacy export also uses this setting. Changing the export selection may rerun the analyzer; the capture's digital waveform remains intact.
 
-In v0.2, keep **Export output → Selected CSV** for that workflow. Other choices export health JSON (including completed health windows), status-change JSONL, PCM-statistics JSONL, PCM WAV, IEC61937 payloads, or an analysis CSV bundle. Standalone reports include input, capture rate, frozen settings and coverage. JSONL reports start with metadata. Health reports and current PCM windows explicitly identify live snapshots; they are not claims of a known capture end.
+Keep **Export output → Selected CSV** for that workflow. Other choices export health JSON (including completed health windows), status-change JSONL, PCM-statistics JSONL, codec-frame JSONL, PCM WAV, IEC61937 payloads, or an analysis CSV bundle. Standalone reports include input, capture rate, frozen settings and coverage. JSONL reports start with metadata. Health reports and current PCM windows explicitly identify live snapshots; they are not claims of a known capture end.
+
+**Structured sample rows** is enabled by default. Disable it for a sparse data table containing status, diagnostics, codec and analysis notifications. Both choices retain all decoded waveform annotations and legacy subframe CSV rows; this setting affects only the per-subframe structured table records. Frozen export settings record the choice. Older saved analyzer settings migrate with full sample rows enabled.
 
 **Analysis window (ms)** controls health and PCM windows. **PCM bits override** defaults to zero (use the declared effective precision); choose 16–24 only to resolve unspecified precision explicitly. It never overrides known precision or bypasses PCM, validity or parity gates. WAV additionally offers **WAV rate override (Hz)** and **Assume A/B stereo**. The latter is needed when interpreting professional independent channels as a stereo pair. Neither option resamples or decodes compressed audio.
 
@@ -44,11 +46,15 @@ Logic automation exports took roughly 55–70 seconds per request in this enviro
 
 Separately timed v0.2 fixture checks located most of that delay in `add_analyzer` (36–68 seconds in these observations); completed bundle/report/file exports then took approximately 0.1–0.6 seconds for those short captures. This does not promise the same timings for other captures or eliminate host setup latency.
 
+Version 0.3 measurements confirmed substantial structured-result ingestion costs in Logic's backend. Disabling **Structured sample rows** reduced setup for the same 25,668-subframe physical recording from approximately 86–92 seconds to 2.3–2.5 seconds, with byte-identical sample CSV. This is an explicit table-output tradeoff, not a change to the default or a decoder throughput guarantee. See [performance methods and limits](PERFORMANCE.md).
+
 ## Reproducing the feature integration checks
 
 The default test-enabled SDK build also produces `SpdifTestSignal` in `build-win/TestAnalyzers/Release`. This independent QA module is never installed or included in the production ZIP. In a separate Logic profile, add both this directory and the production analyzer directory to custom analyzer paths, restart, and enable automation on a separate port (the harness defaults to 10431).
 
 On a simulated device, enable D0 at 50 MS/s. Add **S/PDIF Test Signal** on D0, choose a pattern, then use the UI capture button to retake a demo recording with that analyzer configured. Save recordings of at least 100 ms as `pcm.sal`, `ac3.sal`, `dts.sal`, `changes.sal`, `professional.sal`, and `partial.sal`, matching the six pattern names in order. The partial-header pattern intentionally holds the line after Pc. Adding a source analyzer after a demo capture does not replace its existing waveform; verify the retaken data rather than assuming a keyboard shortcut succeeded.
+
+The QA source also supports 48/96/192 kHz physical audio rates, literal professional CRCC examples, a CRCC-only fault transition, gaps/parity faults, and rate changes. Use a sufficiently high simulated capture rate (250 MS/s covers all three rates). These extra fixtures are test infrastructure and remain excluded from production packages.
 
 With `logic2-automation` installed, run:
 

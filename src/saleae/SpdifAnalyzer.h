@@ -13,7 +13,7 @@
 
 class SpdifSettings final : public AnalyzerSettings {
 public:
- Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0; int detail=0; int csv_export=0; int output=0; U32 window_ms=1000,pcm_bits=0,wav_rate=0; bool assume_stereo=false;
+ Channel channel=UNDEFINED_CHANNEL; U32 nominal=0; int display=0; int detail=0; int csv_export=0; int output=0; U32 window_ms=1000,pcm_bits=0,wav_rate=0; bool assume_stereo=false,table_samples=true;
  SpdifSettings();
  bool SetSettingsFromInterfaces() override;
  void LoadSettings(const char*) override;
@@ -27,7 +27,7 @@ private:
  AnalyzerSettingInterfaceNumberList export_ui;
  AnalyzerSettingInterfaceNumberList output_ui;
  AnalyzerSettingInterfaceInteger window_ui,bits_ui,wav_rate_ui;
- AnalyzerSettingInterfaceBool stereo_ui;
+ AnalyzerSettingInterfaceBool stereo_ui,table_ui;
 };
 struct SpdifAnalysisBatch {
  std::vector<spdif::HealthWindow> health;
@@ -62,12 +62,13 @@ private:
   int detail=0,output=0,csv_export=0;
   U32 capture_rate=0,channel=0,pcm_bits=0,wav_rate=0;
   U64 trigger=0;
-  bool assume_stereo=false,ready=false;
+  bool assume_stereo=false,table_samples=true,ready=false;
   std::string settings_json;
  };
  Snapshot published_snapshot{};
  Snapshot Freeze();
  spdif::Subframe ReadSubframe(U64 sample_index,const Snapshot&);
+ void ReplayBurst(const BurstRecord&,const Snapshot&,const std::function<void(const spdif::BurstEvent&)>&);
  std::string CsvHeader(unsigned) const;
  void CsvRow(unsigned,U64,std::ostream&,const Snapshot&);
  void ExportOutput(const char*,const Snapshot&);

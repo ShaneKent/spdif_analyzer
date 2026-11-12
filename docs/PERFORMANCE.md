@@ -59,6 +59,21 @@ Local raw reports are ignored artifacts: `artifacts/pipeline-baseline-v1/report.
 
 Linux memory uses `/proc/self/status` `VmHWM`; Windows uses `PeakWorkingSetSize`; macOS/fallback uses `getrusage`. The method is recorded. In this environment `ru_maxrss` inherited the Python launcher's pre-exec high-water floor, so earlier pre-change memory numbers must not be treated as a measured memory improvement. Retained object capacity reports vector object storage, not allocator overhead, pointed-to string allocations, SDK storage, or the whole process RSS. Export mode intentionally retains subframes for a single immutable CSV cursor; online analysis mode does not. Memory growth in the export mode is therefore expected and disclosed.
 
+## Native Logic measurements and table density
+
+Windows x64, Logic 2.4.48, MSVC Release, the same saved physical D6 AC-3 capture at 100 MS/s: 25,668 subframes over approximately 0.267 seconds. Each analyzer was removed after export. The RPC includes native analysis and Logic database ingestion; it is not isolated decoder CPU time.
+
+| Table setting | Waveform detail | Add-analyzer RPC | CSV export request | CSV rows |
+|---|---|---:|---:|---:|
+| Full structured sample rows | Samples | 85.807 s | 0.697 s | 25,668 |
+| Full structured sample rows | Fields | 86.010 s | 0.498 s | 25,668 |
+| Sparse structured table | Samples | 2.521 s | 0.494 s | 25,668 |
+| Sparse structured table | Fields | 2.344 s | 0.610 s | 25,668 |
+
+All four CSV files have SHA-256 `15ed0e8285e03507952f989332c5837f7ecfb8fc5fad66ede8aba31c45e15ba4` and 3,458,340 bytes. The explicit sparse choice reduces per-sample data-table storage; it retains every legacy waveform frame and CSV sample, plus sparse codec/status/diagnostic/analysis records. Full structured sample rows remain enabled by default. These are single runs on a shared host, not a statistical speedup guarantee. A separate pre-locale-change run took 91.882/87.273 seconds to add the analyzer and approximately 0.497/0.498 seconds to export. The locale change alone did not demonstrate a native improvement.
+
+Logic's launch PID does not account for its backend child. A read-only snapshot during a full-table run found approximately 1.585 GB working set and 2.053 GB private usage counter in the busy backend, while the launch process used approximately 149 MB. Those are point observations, not concurrent tree peaks. Early local probe reports are explicitly labeled launch-PID-only and must not be read as total Logic memory. Backend log database-completion timestamps match the long add-analyzer interval. Full-table long recordings can therefore consume substantial time and memory even when the portable decoder is fast.
+
 ## Regression policy
 
 Use `--compare previous/report.json` for an advisory comparison. Add `--enforce` only on a controlled host with the same build label, capture settings, filesystem device, and at least three repetitions. The executable hash may differ because a code change is being measured. Output checksum and subframe counts must match before speed is compared. A changed result is a correctness failure, not an optimization.
@@ -96,3 +111,15 @@ The loop uses 4096 bytes for edges/input. For `fuzz_codec` and `tests/fuzz/codec
 Initial local 10-second, seed-1 mutation runs completed without crashes: edges 155 executions (75 MiB peak), input 12,846 (90 MiB), codec 161,970 (173 MiB). All final committed seeds, including maximum-size boundary seeds added afterwards, replayed successfully. This is bounded smoke evidence, not exhaustive coverage. LeakSanitizer was disabled locally because the traced sandbox does not support its process inspection; it is not evidence of a passing leak check. Longer scheduled/manual runs should increase `-max_total_time` with the same input/RSS limits and preserve logs.
 
 On failure, retain the emitted artifact and sanitizer log, replay it directly against the same instrumented executable, then minimize with `-minimize_crash=1 -exact_artifact_path=/tmp/minimized ...`. Add the minimized reproducer under `tests/fuzz/regressions/<target>-<description>` and replay it explicitly in that target's regression run; include a deterministic unit test when the expected protocol behavior is known. No invented crash seeds are recorded as regressions. Timeouts, allocation-limit failures, invariant failures, and sanitizer failures are test failures to investigate, not accepted parser rejections.
+
+## Windows process-tree sampler
+
+Use the read-only standard-library sampler while an isolated Logic test runs:
+
+```powershell
+python scripts/native_metrics.py --pid <isolated-Logic-PID> --seconds 30 --interval .25 --output artifacts/native-metrics-new.json
+```
+
+It identifies processes by PID and creation time, validates parent lifetime intervals, and reports sampled concurrent descendant working-set/private-usage sums and CPU deltas. Working-set sums include shared pages and are not unique physical memory. Pre-existing children start from their observed CPU baseline; newly born children can be counted from birth. An exited observed parent remains a lineage anchor. Root disappearance/reuse or query errors fail the report explicitly. The sampler never starts, stops or connects to an application.
+
+Sampling can miss a short-lived process entirely. A live descendant also cannot be linked through an intermediate parent that exited before ever being observed. Sub-interval memory peaks are not measured. The 4,096-identity budget and bounded error list prevent indefinite tracking growth. These are disclosed measurement limits, not proof of constant application memory.

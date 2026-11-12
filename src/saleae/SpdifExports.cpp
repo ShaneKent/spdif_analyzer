@@ -22,9 +22,9 @@ void SpdifResults::PublishSnapshot(U64 observed_sample,const std::optional<spdif
  // is half written. Read SDK scalars BEFORE acquiring the metadata mutex.
  Snapshot s;s.pending_header=pending_header;s.capture_rate=analyzer->GetSampleRate();s.trigger=analyzer->GetTriggerSample();
  s.detail=settings->detail;s.output=settings->output;s.csv_export=settings->csv_export;
- s.channel=settings->channel.mChannelIndex;s.pcm_bits=settings->pcm_bits;s.wav_rate=settings->wav_rate;s.assume_stereo=settings->assume_stereo;
+ s.channel=settings->channel.mChannelIndex;s.pcm_bits=settings->pcm_bits;s.wav_rate=settings->wav_rate;s.assume_stereo=settings->assume_stereo;s.table_samples=settings->table_samples;
  spdif::json::Object config;
- config.sample("device_id",settings->channel.mDeviceId).sample("trigger_sample",s.trigger).integer("sample_display",settings->display).integer("csv_export",s.csv_export).integer("export_output",s.output).integer("nominal_rate",settings->nominal).integer("waveform_detail",s.detail).integer("analysis_window_ms",settings->window_ms).integer("pcm_bits_override",s.pcm_bits).integer("wav_rate_override",s.wav_rate).boolean("assume_stereo",s.assume_stereo);
+ config.sample("device_id",settings->channel.mDeviceId).sample("trigger_sample",s.trigger).integer("sample_display",settings->display).integer("csv_export",s.csv_export).integer("export_output",s.output).integer("nominal_rate",settings->nominal).integer("waveform_detail",s.detail).integer("analysis_window_ms",settings->window_ms).integer("pcm_bits_override",s.pcm_bits).integer("wav_rate_override",s.wav_rate).boolean("assume_stereo",s.assume_stereo).boolean("structured_sample_rows",s.table_samples);
  s.settings_json=config.str();s.frames=legacy_frames_written;s.samples=s.frames/(s.detail==0?7:1);s.start=0;s.end=std::max(observed_sample,last_decoded_end);
  std::lock_guard<std::mutex> lock(mutex);
  s.status=status_blocks.size();s.diagnostics=diagnostics.size();s.content=content_events.size();s.changes=status_changes.size();s.pcm=pcm_windows.size();s.health=health_windows.size();s.bursts=burst_records.size();s.codecs=codec_events.size();
@@ -50,6 +50,16 @@ spdif::Subframe SpdifResults::ReadSubframe(U64 index,const Snapshot& snapshot){
  s.content=static_cast<spdif::ContentFormat>((f.mData1>>32)&255);s.layout.bits=unsigned((f.mData1>>40)&31);s.layout.known=((f.mData1>>45)&1)!=0;s.layout.stereo=((f.mData1>>46)&1)!=0;s.layout.professional=((f.mData1>>47)&1)!=0;
  s.validity=((s.raw>>24)&1)!=0;s.user=((s.raw>>25)&1)!=0;s.status=((s.raw>>26)&1)!=0;s.parity=((s.raw>>27)&1)!=0;s.parity_ok=parity(s.raw);return s;
 }
+void SpdifResults::ReplayBurst(const BurstRecord& b,const Snapshot& s,const std::function<void(const spdif::BurstEvent&)>& send){
+ const U64 stride=s.detail==0?7:1;send(b.begin);
+ const U64 available=b.first_payload<s.frames?(s.frames-b.first_payload)/stride:0;
+ const U64 words=std::min<U64>(b.words,available);uint64_t remaining=b.begin.declared_bits;
+ for(U64 i=0;i<words;++i){
+  if(UpdateExportProgressAndCheckForCancel(i,words))throw std::runtime_error("Codec/payload export cancelled");
+  auto f=ReadSubframe(b.first_payload/stride+i,s);auto event=b.begin;event.phase=spdif::BurstPhase::Word;event.index=i;event.word=uint16_t(f.raw>>8);event.valid_bits=uint8_t(std::min<uint64_t>(remaining,16));event.info.end=f.end;send(event);remaining-=event.valid_bits;
+ }
+ if(b.closed&&b.end.info.end<=s.end&&words==b.words)send(b.end);
+}
 std::string SpdifResults::CsvHeader(unsigned kind)const{
  switch(kind){case 0:return "start_seconds,end_seconds,channel,preamble,block_position,raw_slots_4_31,payload_hex,signed_container_24,main_field_raw,auxiliary,V_invalid,U,C,P,parity_ok,measured_sample_rate_hz,sample_meaning,content,layout_bits,layout_known,layout_stereo,layout_professional";
  case 1:return "start_seconds,end_seconds,channel,complete,integrity,C_bytes_earliest_first,U_bytes_earliest_first,interpretation,status_crc,status_crc_received,status_crc_expected";
@@ -57,7 +67,7 @@ std::string SpdifResults::CsvHeader(unsigned kind)const{
  default:return "start_seconds,end_seconds,format,burst,complete,integrity,Pc,Pd,evidence";}
 }
 void SpdifResults::CsvRow(unsigned kind,U64 row,std::ostream& out,const Snapshot& snapshot){
- out.imbue(std::locale::classic());out<<std::setprecision(12);
+ out<<std::setprecision(12);
  const auto trigger=snapshot.trigger;const auto rate=snapshot.capture_rate;
  const auto time=[=](U64 n){return (double(n)-double(trigger))/rate;};
  if(kind==0){auto s=ReadSubframe(row,snapshot);out<<time(s.start)<<','<<time(s.end)<<','<<(s.channel?'B':'A')<<','<<s.preamble<<',';if(s.block_position>=0)out<<s.block_position;
@@ -87,15 +97,10 @@ void SpdifResults::ExportOutput(const char* name,const Snapshot& s){
   writer.finish(s.end+1);return;
  }
  if(s.output==5){
-  spdif::exports::BurstWriter writer(std::string(name)+".bursts");const U64 stride=s.detail==0?7:1;
+  spdif::exports::BurstWriter writer(std::string(name)+".bursts");
   spdif::codec::Inspector inspector([&](const spdif::codec::CodecInfo& c){writer.codec(c);});
   const auto send=[&](const spdif::BurstEvent& e){inspector.burst(e);writer.burst(e);};
-  for(size_t n=0;n<s.bursts;++n){if(cancelled(n,s.bursts))throw std::runtime_error("Payload export cancelled; incomplete marker retained");BurstRecord b;if(n+1==s.bursts)b=s.tail_burst;else{std::lock_guard<std::mutex> lock(mutex);b=burst_records.at(n);}send(b.begin);
-   const U64 available=b.first_payload<s.frames?(s.frames-b.first_payload)/stride:0;
-   const U64 words=std::min<U64>(b.words,available);uint64_t remaining=b.begin.declared_bits;
-   for(U64 i=0;i<words;++i){if(cancelled(i,words))throw std::runtime_error("Payload export cancelled; incomplete marker retained");auto f=ReadSubframe(b.first_payload/stride+i,s);auto event=b.begin;event.phase=spdif::BurstPhase::Word;event.index=i;event.word=uint16_t(f.raw>>8);event.valid_bits=uint8_t(std::min<uint64_t>(remaining,16));event.info.end=f.end;send(event);remaining-=event.valid_bits;}
-   if(b.closed&&b.end.info.end<=s.end&&words==b.words)send(b.end);
-  }
+  for(size_t n=0;n<s.bursts;++n){if(cancelled(n,s.bursts))throw std::runtime_error("Payload export cancelled; incomplete marker retained");BurstRecord b;if(n+1==s.bursts)b=s.tail_burst;else{std::lock_guard<std::mutex> lock(mutex);b=burst_records.at(n);}ReplayBurst(b,s,send);}
   if(s.pending_header)send(*s.pending_header);
   inspector.finish();writer.finish();return;
  }
@@ -116,6 +121,13 @@ void SpdifResults::ExportOutput(const char* name,const Snapshot& s){
  }else if(s.output==7){
   out<<context(spdif::json::event("metadata")).str()<<'\n';
   for(size_t i=0;i<s.codecs;++i){if(cancelled(i,s.codecs))throw std::runtime_error("Codec report cancelled");spdif::codec::CodecInfo c;{std::lock_guard<std::mutex> lock(mutex);c=codec_events.at(i);}out<<spdif::json::record(c)<<'\n';}
+  // Replay only the frozen unfinished tail: a prefix snapshot, not capture EOF.
+  if((s.bursts&&!s.tail_burst.closed)||s.pending_header){
+   spdif::codec::Inspector prefix_inspector([&](const spdif::codec::CodecInfo& c){auto record=spdif::json::record(c);record.pop_back();out<<record<<",\"snapshot_prefix\":true,\"live_snapshot\":true}\n";});
+   if(s.bursts&&!s.tail_burst.closed)ReplayBurst(s.tail_burst,s,[&](const spdif::BurstEvent& e){prefix_inspector.burst(e);});
+   if(s.pending_header)prefix_inspector.burst(*s.pending_header);
+   prefix_inspector.finish();
+  }
  }else if(s.output==3){
   out<<context(spdif::json::event("metadata")).str()<<'\n';
   for(size_t i=0;i<s.pcm;++i){if(cancelled(i,s.pcm))throw std::runtime_error("PCM statistics export cancelled");spdif::PcmWindow p;{std::lock_guard<std::mutex> lock(mutex);p=pcm_windows.at(i);}out<<spdif::json::record(p)<<'\n';}
@@ -128,7 +140,7 @@ void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 kind){
   const auto snapshot=Freeze();
   if(kind==0&&snapshot.output!=0){ExportOutput(name,snapshot);UpdateExportProgressAndCheckForCancel(1,1);return;}
   if(kind==0)kind=unsigned(snapshot.csv_export);
-  std::ofstream out(name,std::ios::binary);checked(out);out<<CsvHeader(kind)<<'\n';
+  std::ofstream out(name,std::ios::binary);out.imbue(std::locale::classic());checked(out);out<<CsvHeader(kind)<<'\n';
   const std::array<U64,4> counts={snapshot.samples,snapshot.status,snapshot.diagnostics,snapshot.content};if(kind>3)throw std::invalid_argument("Unknown CSV export kind");
   for(U64 n=0;n<counts[kind];++n){if(UpdateExportProgressAndCheckForCancel(n,counts[kind]))break;CsvRow(kind,n,out,snapshot);out<<'\n';}
   out.flush();checked(out);out.close();checked(out);UpdateExportProgressAndCheckForCancel(counts[kind],counts[kind]);

@@ -105,6 +105,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(data['stats']['V_invalid'], 1)
         self.assertEqual(sum(b['accepted'] for group in data['pcm_bins'] for b in group), 2)
 
+    def test_excluded_or_mixed_pcm_windows_use_uncertain_rendering(self):
+        rows = [event('pcm_window', start_sample='0', end_sample_exclusive='100', accepted=0, excluded_non_pcm=64),
+                event('pcm_window', start_sample='100', end_sample_exclusive='200', accepted=2, excluded_invalid=1, rms=123)]
+        data, text = self.run_report(self.source(rows))
+        self.assertEqual([e['record']['accepted'] for e in data['events']], [0, 2])
+        self.assertEqual(data['events'][0]['record']['excluded_non_pcm'], 64)
+        self.assertEqual(data['events'][1]['record']['rms'], 123)
+        self.assertIn("e.kind==='pcm_window'&&['excluded_parity','excluded_invalid','excluded_unknown','excluded_non_pcm','excluded_layout'].some(k=>Number(r[k]||0)>0)", text)
+        self.assertIn("color='#e7ad56'", text)
+
     def test_sparse_categories_and_exact_source_vs_notification(self):
         rows = frames([(0, 0)])
         for kind in ['content', 'channel_status', 'status_change', 'diagnostic', 'health_window', 'pcm_window']:

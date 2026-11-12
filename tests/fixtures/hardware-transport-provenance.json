@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "evidence_date": "2026-11-11",
+  "scope": "Sanitized transport metadata derived from physical steady AC3 and DTS captures; no source audio, captured compressed bytes, device identifiers, or raw edges are included",
+  "physical_environment": {
+    "platform": "Windows x64",
+    "application": "Saleae Logic 2.4.48",
+    "capture_rate_hz": 100000000,
+    "carrier_rate_hz": 48000,
+    "paths": ["D6", "D7"]
+  },
+  "observed_status": {
+    "D6_C_hex": "061200020000000000000000000000000000000000000000",
+    "D7_C_hex": "041200020000000000000000000000000000000000000000",
+    "difference": {"byte_zero_based": 0, "bit_lsb_zero_based": 1, "meaning": "consumer audio/non-audio declaration"},
+    "both_channels_agree": true,
+    "declared_sample_rate_hz": 48000,
+    "effective_audio_precision": "not indicated"
+  },
+  "observed_profiles": [
+    {"format": "AC3", "Pc": 1, "Pd_bits": 6144, "payload_bytes": 768, "period_stereo_frames": 1536, "independently_validated_D6_payloads": 8, "D6_D7_complete_payloads_equal_in_order": 8},
+    {"format": "DTS core type I", "Pc": 11, "Pd_bits": 8192, "payload_bytes": 1024, "period_stereo_frames": 512, "independently_validated_D6_payloads": 18, "D6_D7_complete_payloads_equal_in_order": 18}
+  ],
+  "independent_evidence": {
+    "physical_payload_check": "Accepted D6 extracted payloads matched source payload frames byte for byte; independent FFmpeg decode with CRC checking returned zero without codec errors",
+    "cross_path_check": "Raw upper16 payload words were independently collected at literal F872/4E1F/Pc/Pd headers; complete D6 and D7 payload arrays were byte identical in order",
+    "regression_payload": "New deterministic words 0x4000 | ((word_index * 73 + Pc * 29) & 0x3fff); these are not captured audio or claimed valid compressed codec frames"
+  },
+  "limitations": [
+    "The deterministic regression is derived synthetic transport evidence, not a recording replay or independent codec validation",
+    "Steady captures do not establish PCM/compressed transitions, gaps, physical reconnect or reacquisition",
+    "D7 PCM declaration conflicts with IEC headers; identical payload bytes do not authorize overriding that status declaration",
+    "EAC3 hardware evidence and calibrated clock or jitter measurements are not established by these artifacts"
+  ]
+}

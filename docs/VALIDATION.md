@@ -1,5 +1,17 @@
 # Validation record — 2026-11-11
 
+## Version 0.3 verification
+
+The foundation `4548dad` passed Windows x64, Linux x64, macOS arm64, sanitizer and bounded fuzz CI: [run 43147061216](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147061216). A real release-workflow dispatch also passed all platform tests, sanitizer/fuzz gates and aggregate package validation: [run 43147752973](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147752973). Its three production packages were independently downloaded and checked for actual binary architecture, source/SDK provenance, exact approved members, and internal/external hashes. Dispatch did not publish a release; these runs precede subsequent native-validation changes.
+
+New independent vectors cover professional CRCC and bounded AC-3/E-AC-3/DTS header/integrity inspection. They include the literal AES3 Annex B checksums, independent encoded frames, four DTS byte packings, damage, truncation, unknown source intervals and trust recovery. The sanitized physical-status regression adds 78,141 checks without publishing captured audio. See [codec integrity rules](CODECS.md), [physical evidence](HARDWARE.md), and the corresponding test sources.
+
+Actual Logic 2.4.48 tests use a separate profile and preserve the user's original process. The native loader verifies archive v6, its explicit sparse-table choice, and migrations from v1–v5. On saved physical captures, the codec harness checks both waveform modes and both D6/D7 paths against current offline decoding and independently generated source payloads. D6 yielded eight AC-3 and eighteen DTS accepted payloads. D7's conflicting PCM declaration yielded zero accepted payloads. A synthetic partial candidate remained an explicitly truncated snapshot prefix; dense and sparse tables retained identical legacy CSV bytes. Codec JSONL, payload-index codec records and structured notification fields agree, with ordered nonoverlapping table publication intervals. `scripts/smoke_codecs.py --verify-only` rechecked the collected artifacts independently of Logic.
+
+Windowed comparison has regression coverage for fixed offsets, steps, timestamp drift, holes, edge clipping, ambiguity and configuration boundaries. The unchanged fixed-window behavior remains tested. Actual D6/D7 PCM data produced six ambiguous windows and no invented unique delay. Standalone reports for real DTS and PCM plus comparison passed isolated Chrome interaction checks: zoom/pan/reset, exact event details, search/type filtering, pagination where applicable, and no JavaScript errors. Counts were 19,251/12,834 dense subframes and 273/82 sparse events respectively.
+
+Native result ingestion has substantial costs beyond portable decoding. The explicit sparse-table option improved the measured setup while preserving full sample CSV; see [performance measurements and limits](PERFORMANCE.md). Long-capture and physical carrier-loss evidence must be stated separately from short saved-capture, synthetic and playback-close tests. A successful build or source stream reopening does not establish a physical cable-loss recovery result.
+
 ## Version 0.2 verification
 
 The feature suite builds the same SDK-independent decoder, analysis and export libraries used by Logic. Separate executables cover the original **131,997 decoder checks**, **175 professional/cadence/streaming checks**, **2,536 analysis checks**, and **95 export checks**. Python subprocess suites cover offline JSONL/policy behavior and two-stream comparison. The Windows build runs all six CTest targets; the DLL lifecycle harness additionally verifies all ten settings, v4 persistence, and migrations from v1/v2/v3.
@@ -48,7 +60,7 @@ User-connected **D6 and D7** were captured using a Logic 8 at **100 MS/s**. Each
 
 Logic field-mode exports preserved exactly 16,042 CSV rows for each stream. Visual inspection confirmed separate waveform labels for V/U/C/P, including `V=0 valid` and `P=0 parity OK`, and PCM labels once status was established. Raw source captures and screenshots remain local and are excluded from Git.
 
-No real Dolby Digital or DTS source has yet been verified. Compressed-format tests use independent synthetic IEC 61937 transport fixtures, including error, truncation, conflict and format-change cases. Codec names identify the signaled transport type; payload decompression and codec CRC validation are outside scope.
+At v0.1, real Dolby Digital and DTS sources had not been verified; its compressed-format tests used independent synthetic IEC 61937 fixtures. Current physical-source and codec-integrity evidence is recorded above and in [HARDWARE.md](HARDWARE.md). Audio decompression remains outside the analyzer's scope.
 
 ## Performance and limits
 

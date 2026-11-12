@@ -36,6 +36,7 @@ void SpdifResults::Add(const spdif::Subframe& s){
   }
  }else {AddFrame(f);++legacy_frames_written;}
  const U64 v2_start=PublishPending(s);
+ if(settings->table_samples){
  FrameV2 v;const char p[]={s.preamble,0};v.AddString("channel",s.layout.stereo?(s.channel?"B / right":"A / left"):(s.channel?"B":"A"));v.AddString("preamble",p);
  v.AddInteger("raw_slots_4_31",s.raw);v.AddString("payload_hex",hex(s.raw&0xffffff,6).c_str());
  v.AddString("content",spdif::content_name(s.content));v.AddInteger("layout_bits",s.layout.bits);v.AddBoolean("layout_known",s.layout.known);v.AddBoolean("layout_stereo",s.layout.stereo);v.AddBoolean("layout_professional",s.layout.professional);
@@ -48,6 +49,7 @@ void SpdifResults::Add(const spdif::Subframe& s){
  v.AddInteger("coverage_start_sample",s.start);v.AddInteger("coverage_end_sample",s.end);
  v.AddDouble("measured_sample_rate_hz",s.sample_rate);v.AddString("sample_meaning","Numeric container; consult channel status and integrity before interpreting as PCM");
  AddFrameV2(v,"subframe",v2_start,f.mEndingSampleInclusive);
+ }
  if(!s.parity_ok)AddMarker(v2_start,ErrorX,settings->channel);
 }
 void SpdifResults::Add(const spdif::StatusBlock& b){

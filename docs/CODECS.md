@@ -16,6 +16,10 @@ Codec_frame structured/JSONL records contain codec/packing, rate/channels/bitrat
 
 In Logic select **Export output → Codec frames JSONL** for the retained snapshot records. Codec metadata also appears in structured table notifications. Burst-extraction indexes add codec_frame entries with a nested versioned record; burst entries continue to describe transport acceptance. Transport-complete payload extraction remains possible when a codec check fails or is unsupported, with that distinction recorded. Existing raw payload bytes are unchanged. Live SDK snapshots do not invent EOF; explicit offline EOF can report partial codec input.
 
+## Frozen codec exports
+
+The dedicated **Codec frames JSONL** and payload-index exports use the same frozen transport prefix. Completed records retain their observed source intervals. An unfinished tail or Pa/Pb/Pc-only candidate can produce a forensic codec record with `snapshot_prefix:true` and `live_snapshot:true`; it remains incomplete and cannot become an accepted payload. Inspecting an export prefix does not finalize the live decoder or manufacture a capture-end event. Structured notifications may require a following decoded subframe; original codec records remain available in exports.
+
 ## Professional channel-status CRCC
 
 AES3 Annex B CRCC is evaluated separately from subframe parity and declared status-field reliability. Received and expected CRC bytes are exposed in status JSON, structured rows and appended status CSV columns. Proven bad CRCC disables status-derived PCM/layout trust, resets semantic comparison baselines, and cannot be bypassed by a WAV rate/precision override. Health retains parity-based status counts and adds separate passed/failed/unverified CRC counts.
