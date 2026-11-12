@@ -9,8 +9,8 @@
 #include <stdexcept>
 namespace {
 constexpr U8 PreambleType=0,PType=6,SampleType=7;
-std::string hex(uint64_t x,int width){std::ostringstream o;o<<"0x"<<std::uppercase<<std::hex<<std::setw(width)<<std::setfill('0')<<x;return o.str();}
-std::string bytes(const std::array<uint8_t,24>& b){std::ostringstream out;for(auto n:b)out<<std::uppercase<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(n);return out.str();}
+std::string hex(uint64_t x,int width){std::ostringstream o;o.imbue(std::locale::classic());o<<"0x"<<std::uppercase<<std::hex<<std::setw(width)<<std::setfill('0')<<x;return o.str();}
+std::string bytes(const std::array<uint8_t,24>& b){std::ostringstream out;out.imbue(std::locale::classic());for(auto n:b)out<<std::uppercase<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(n);return out.str();}
 std::string csv(const std::string& value){std::string out="\"";for(char c:value){if(c=='"')out+='"';out+=c;}return out+'"';}
 int32_t signed_sample(uint32_t raw){const uint32_t p=raw&0xffffff;return (p&0x800000)?int32_t(p)-0x1000000:int32_t(p);}
 bool parity(uint32_t raw){unsigned count=0;for(unsigned i=0;i<28;++i)count+=(raw>>i)&1;return !(count&1);}
@@ -97,9 +97,24 @@ void SpdifResults::ExportOutput(const char* name,const Snapshot& s){
   writer.finish();return;
  }
  std::ofstream out(name,std::ios::binary);checked(out);
- if(s.output==1){auto o=spdif::json::event("summary");o.boolean("live_snapshot",true);out<<spdif::json::health_fields(o,s.summary)<<'\n';}
- else if(s.output==2){for(size_t i=0;i<s.changes;++i){if(cancelled(i,s.changes))throw std::runtime_error("Status change export cancelled");spdif::StatusChange change;{std::lock_guard<std::mutex> lock(mutex);change=status_changes.at(i);}out<<spdif::json::record(change)<<'\n';}}
- else if(s.output==3){for(size_t i=0;i<s.pcm;++i){if(cancelled(i,s.pcm))throw std::runtime_error("PCM statistics export cancelled");spdif::PcmWindow p;{std::lock_guard<std::mutex> lock(mutex);p=pcm_windows.at(i);}out<<spdif::json::record(p)<<'\n';}for(const auto& p:s.current_pcm){auto record=spdif::json::record(p);record.pop_back();out<<record<<",\"live_snapshot\":true}\n";}}
+ const auto context=[&](spdif::json::Object o){return o.text("analyzer_version","0.2.0").text("input_channel","D"+std::to_string(s.channel)).number("capture_rate_hz",s.capture_rate).sample("origin_sample",s.start).sample("coverage_start_sample",s.start).sample("coverage_end_sample_inclusive",s.end).raw("settings",s.settings_json).boolean("live_snapshot",true);};
+ if(s.output==1){
+  auto record=spdif::json::health_fields(context(spdif::json::event("summary")),s.summary);record.pop_back();out<<record<<",\"health_windows\":[";
+  for(size_t i=0;i<s.health;++i){
+   if(cancelled(i,s.health))throw std::runtime_error("Health window export cancelled");
+   spdif::HealthWindow h;{std::lock_guard<std::mutex> lock(mutex);h=health_windows.at(i);}
+   if(i)out<<',';
+   out<<spdif::json::record(h);
+  }
+  out<<"]}\n";
+ }else if(s.output==2){
+  out<<context(spdif::json::event("metadata")).str()<<'\n';
+  for(size_t i=0;i<s.changes;++i){if(cancelled(i,s.changes))throw std::runtime_error("Status change export cancelled");spdif::StatusChange change;{std::lock_guard<std::mutex> lock(mutex);change=status_changes.at(i);}out<<spdif::json::record(change)<<'\n';}
+ }else if(s.output==3){
+  out<<context(spdif::json::event("metadata")).str()<<'\n';
+  for(size_t i=0;i<s.pcm;++i){if(cancelled(i,s.pcm))throw std::runtime_error("PCM statistics export cancelled");spdif::PcmWindow p;{std::lock_guard<std::mutex> lock(mutex);p=pcm_windows.at(i);}out<<spdif::json::record(p)<<'\n';}
+  for(const auto& p:s.current_pcm){if(cancelled(s.pcm,s.pcm+s.current_pcm.size()))throw std::runtime_error("PCM statistics export cancelled");auto record=spdif::json::record(p);record.pop_back();out<<record<<",\"live_snapshot\":true}\n";}
+ }
  out.flush();checked(out);out.close();checked(out);
 }
 void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 kind){

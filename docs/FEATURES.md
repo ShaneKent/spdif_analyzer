@@ -23,6 +23,8 @@ PCM statistics operate on confirmed PCM with good parity, V=0 and a supported de
 
 Live reports use a read-only snapshot of current statistics. They do not invent an EOF or extend a held sample through an unknown gap. In JSON, source windows and analysis intervals are half-open; decoder subframe and raw block source ends remain explicitly inclusive.
 
+Logic health JSON includes the cumulative live summary and a `health_windows` array containing every completed window in its frozen snapshot. Sparse table notifications may summarize a large event batch; this export retains the window records. Standalone reports include analyzer version, input channel, capture rate, settings and observed coverage; status-change and PCM JSONL begin with a metadata record.
+
 ## Status changes and professional streams
 
 Changes compare successive complete, parity-good blocks separately for A and B. They include raw changed-bit masks and old/new interpreted values. Identical blocks produce no change event; initial acquisition is a baseline. Damaged/incomplete blocks and synchronization loss prevent stale comparisons.

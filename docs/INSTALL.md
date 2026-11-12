@@ -30,8 +30,28 @@ The default Fields waveform detail splits each subframe into seven annotations. 
 
 Choose the desired **CSV export** format in the analyzer settings, then use its generic **Export to TXT/CSV** action. The automation API's legacy export also uses this setting. Changing the export selection may rerun the analyzer; the capture's digital waveform remains intact.
 
+In v0.2, keep **Export output → Selected CSV** for that workflow. Other choices export health JSON (including completed health windows), status-change JSONL, PCM-statistics JSONL, PCM WAV, IEC61937 payloads, or an analysis CSV bundle. Standalone reports include input, capture rate, frozen settings and coverage. JSONL reports start with metadata. Health reports and current PCM windows explicitly identify live snapshots; they are not claims of a known capture end.
+
+**Analysis window (ms)** controls health and PCM windows. **PCM bits override** defaults to zero (use the declared effective precision); choose 16–24 only to resolve unspecified precision explicitly. It never overrides known precision or bypasses PCM, validity or parity gates. WAV additionally offers **WAV rate override (Hz)** and **Assume A/B stereo**. The latter is needed when interpreting professional independent channels as a stereo pair. Neither option resamples or decodes compressed audio.
+
+Directory exports append `.wav-export`, `.bursts`, or `.bundle` to the requested filename. Choose a new destination for each request: existing directories are rejected. Read the index/manifest and check that `INCOMPLETE` is absent. A failure also creates a separate `<requested-filename>.error.json`; the SDK has no dedicated export-error setter. See [feature and format definitions](FEATURES.md) before treating exported files as audio.
+
 The native lifecycle harness is `build-win/Release/smoke_windows.exe`; it expects the plugin path as its argument and the SDK runtime in its executable directory or DLL search path. It verifies loading and settings, while field annotations require Logic's host initialization.
 
 If automatic acquisition produces no samples, inspect the selected channel, digitized input levels, sample rate and manual-rate override. A capture beginning inside a block can produce valid subframes before complete channel status is available. Format labels remain Unknown until supported evidence is established.
 
 Logic automation exports took roughly 55–70 seconds per request in this environment, even for short recordings. Keep the same request running while it progresses; repeated exports create more work. This observed application/API latency is separate from the decoder-core throughput reported in the validation record.
+
+## Reproducing the feature integration checks
+
+The default test-enabled SDK build also produces `SpdifTestSignal` in `build-win/TestAnalyzers/Release`. This independent QA module is never installed or included in the production ZIP. In a separate Logic profile, add both this directory and the production analyzer directory to custom analyzer paths, restart, and enable automation on a separate port (the harness defaults to 10431).
+
+On a simulated device, enable D0 at 50 MS/s. Add **S/PDIF Test Signal** on D0, choose a pattern, then use the UI capture button to retake a demo recording with that analyzer configured. Save recordings of at least 100 ms as `pcm.sal`, `ac3.sal`, `dts.sal`, `changes.sal`, `professional.sal`, and `partial.sal`, matching the six pattern names in order. The partial-header pattern intentionally holds the line after Pc. Adding a source analyzer after a demo capture does not replace its existing waveform; verify the retaken data rather than assuming a keyboard shortcut succeeded.
+
+With `logic2-automation` installed, run:
+
+```powershell
+python scripts/smoke_features.py <fixture-directory> --port 10431 --output artifacts/native-feature-check
+```
+
+The output directory must not already exist. The script opens and closes new capture tabs, acquires no hardware, and verifies the exports against the known fixture behavior. `--only pcm changes` selects a subset for diagnosis. Synthetic AC3/DTS payloads exercise transport identification and extraction; they are not codec-valid compressed audio.

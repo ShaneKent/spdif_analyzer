@@ -4,17 +4,18 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 namespace spdif::exports {
 namespace fs=std::filesystem;
 namespace {
-std::string quote(const std::string& s){std::ostringstream o;o<<'"';for(unsigned char c:s){switch(c){case '"':o<<"\\\"";break;case '\\':o<<"\\\\";break;case '\n':o<<"\\n";break;case '\r':o<<"\\r";break;case '\t':o<<"\\t";break;default:if(c<32)o<<"\\u"<<std::hex<<std::setw(4)<<std::setfill('0')<<unsigned(c)<<std::dec;else o<<char(c);}}o<<'"';return o.str();}
+std::string quote(const std::string& s){std::ostringstream o;o.imbue(std::locale::classic());o<<'"';for(unsigned char c:s){switch(c){case '"':o<<"\\\"";break;case '\\':o<<"\\\\";break;case '\n':o<<"\\n";break;case '\r':o<<"\\r";break;case '\t':o<<"\\t";break;default:if(c<32)o<<"\\u"<<std::hex<<std::setw(4)<<std::setfill('0')<<unsigned(c)<<std::dec;else o<<char(c);}}o<<'"';return o.str();}
 void checked(std::ostream& o){if(!o)throw std::runtime_error("Export write failed");}
-void new_dir(const fs::path& p){if(fs::exists(p)||!fs::create_directories(p))throw std::runtime_error("Export requires a new directory: "+p.string());std::ofstream marker(p/"INCOMPLETE");marker<<"Export is incomplete until this marker is removed.\n";checked(marker);}
+void new_dir(const fs::path& p){if(fs::exists(p)||!fs::create_directories(p))throw std::runtime_error("Export requires a new directory: "+p.string());std::ofstream marker(p/"INCOMPLETE");marker.imbue(std::locale::classic());marker<<"Export is incomplete until this marker is removed.\n";checked(marker);}
 void number16(std::ostream& o,uint16_t n){o.put(char(n&255));o.put(char(n>>8));}
 void number32(std::ostream& o,uint32_t n){number16(o,uint16_t(n));number16(o,uint16_t(n>>16));}
-std::string filename(const char* prefix,uint64_t n,const char* ext){std::ostringstream s;s<<prefix<<std::setw(6)<<std::setfill('0')<<n<<ext;return s.str();}
+std::string filename(const char* prefix,uint64_t n,const char* ext){std::ostringstream s;s.imbue(std::locale::classic());s<<prefix<<std::setw(6)<<std::setfill('0')<<n<<ext;return s.str();}
 bool codec(ContentFormat c){return c==ContentFormat::Ac3||c==ContentFormat::Dts1||c==ContentFormat::Dts2||c==ContentFormat::Dts3||c==ContentFormat::Eac3;}
 void wav_header(std::ostream& out,unsigned rate,unsigned bits,uint32_t bytes){
  out.write("RIFF",4);number32(out,60+bytes);out.write("WAVEfmt ",8);number32(out,40);
@@ -31,7 +32,7 @@ struct WavWriter::Impl {
   if(!(cfg.capture_rate>0)||!std::isfinite(cfg.capture_rate)||cfg.capture_rate>double(UINT32_MAX))throw std::invalid_argument("WAV requires a finite capture rate in (0, UINT32_MAX]");
   if(cfg.bits_override && (cfg.bits_override<16||cfg.bits_override>24))throw std::invalid_argument("WAV bit override must be 16..24");
   if(cfg.rate_override && (cfg.rate_override<8000||cfg.rate_override>192000))throw std::invalid_argument("WAV rate override must be 8000..192000");
-  new_dir(dir);index.open(dir/"index.jsonl",std::ios::binary);
+  new_dir(dir);index.open(dir/"index.jsonl",std::ios::binary);index.imbue(std::locale::classic());
   index<<"{\"type\":\"configuration\",\"schema_version\":1,\"container_bits\":24,\"capture_rate\":"<<std::setprecision(17)<<cfg.capture_rate<<",\"bits_override\":"<<cfg.bits_override<<",\"rate_override\":"<<cfg.rate_override<<",\"assume_stereo\":"<<(cfg.assume_stereo?"true":"false")<<",\"timestamp_encoding\":\"decimal strings, inclusive capture samples\"}\n";checked(index);
  }
  ~Impl(){try{if(!done){close("writer_not_finished");index<<"{\"type\":\"finish\",\"complete\":false}\n";index.flush();}}catch(...){}}
@@ -73,7 +74,7 @@ struct WavWriter::Impl {
   const bool override_bits=!f.layout.known||!left.layout.known;
   if(active && (rate!=r||bits!=layout.bits||professional!=layout.professional||overridden_bits!=override_bits||declared_rates[0]!=rates[0]||declared_rates[1]!=rates[1]))close("rate_or_layout_change");
   if(active && frames>=(uint64_t(UINT32_MAX)-60)/6)close("riff_size_limit");
-  if(!active){final_name=filename("segment-",++segment_number,".wav");part_name=final_name+".part";wav.open(dir/part_name,std::ios::binary);rate=r;declared_rates[0]=rates[0];declared_rates[1]=rates[1];bits=layout.bits;professional=layout.professional;overridden_bits=override_bits;frames=0;start=left.start;wav_header(wav,rate,bits,0);checked(wav);active=true;}
+  if(!active){final_name=filename("segment-",++segment_number,".wav");part_name=final_name+".part";wav.open(dir/part_name,std::ios::binary);wav.imbue(std::locale::classic());rate=r;declared_rates[0]=rates[0];declared_rates[1]=rates[1];bits=layout.bits;professional=layout.professional;overridden_bits=override_bits;frames=0;start=left.start;wav_header(wav,rate,bits,0);checked(wav);active=true;}
   const Subframe* pair[]={&left,&f};
   for(const auto* s:pair){
    const int64_t value=int64_t(pcm_value(s->raw,layout))*(int64_t(1)<<(24-layout.bits));
@@ -91,7 +92,7 @@ void WavWriter::finish(uint64_t end_exclusive){if(impl->done)return;if(end_exclu
 struct BurstWriter::Impl {
  fs::path dir;std::ofstream index,payload;bool done=false,active=false,receiving=false,malformed=false;
  BurstEvent begin{};uint64_t number=0,words=0,bits=0,last_end=0;std::string part_name,final_name;
- explicit Impl(const fs::path& p):dir(p){new_dir(dir);index.open(dir/"index.jsonl",std::ios::binary);index<<"{\"type\":\"configuration\",\"schema_version\":1,\"word_order\":\"big-endian 16-bit transport words in received A/B order\",\"partial_word\":\"valid bits are high bits; unused low bits are zero, final word retained as two bytes\",\"timestamp_encoding\":\"decimal strings, inclusive capture samples\"}\n";checked(index);}
+ explicit Impl(const fs::path& p):dir(p){new_dir(dir);index.open(dir/"index.jsonl",std::ios::binary);index.imbue(std::locale::classic());index<<"{\"type\":\"configuration\",\"schema_version\":1,\"word_order\":\"big-endian 16-bit transport words in received A/B order\",\"partial_word\":\"valid bits are high bits; unused low bits are zero, final word retained as two bytes\",\"timestamp_encoding\":\"decimal strings, inclusive capture samples\"}\n";checked(index);}
  ~Impl(){try{if(!done){if(active){auto previous=begin.info;previous.end=last_end;end(previous,false,"writer_not_finished");}index<<"{\"type\":\"finish\",\"complete\":false}\n";index.flush();}}catch(...){}}
  void end(const ContentInfo& info,bool good,const std::string& reason){
   if(!active)return;
@@ -110,7 +111,7 @@ struct BurstWriter::Impl {
    const uint32_t expected=type==21?uint32_t(e.info.pd)*8:uint32_t(e.info.pd);
    receiving=e.supported&&known&&expected>0&&expected==e.declared_bits;
    final_name=filename("burst-",++number,".bin");
-   if(receiving){part_name=final_name+".part";payload.open(dir/part_name,std::ios::binary);checked(payload);}
+   if(receiving){part_name=final_name+".part";payload.open(dir/part_name,std::ios::binary);payload.imbue(std::locale::classic());checked(payload);}
   }else if(e.phase==BurstPhase::Word){
    if(!active)return;
    if(!receiving)return;
@@ -134,7 +135,7 @@ namespace {
 const char* dataset_names[]={"subframes.csv","channel-status.csv","diagnostics.csv","content.csv"};
 void manifest(const fs::path& dir,const BundleSpec& spec,const std::array<CsvSource,4>& sources,const BundleResult& result,const std::string& reason){
  const auto temp=dir/"manifest.json.tmp";
- std::ofstream out(temp,std::ios::binary);
+ std::ofstream out(temp,std::ios::binary);out.imbue(std::locale::classic());
  out<<"{\n  \"schema_version\":"<<quote(spec.schema_version)<<",\"analyzer_version\":"<<quote(spec.analyzer_version)<<",\"input_channel\":"<<quote(spec.input_channel)<<",\"capture_rate\":"<<std::setprecision(17)<<spec.capture_rate<<",\"settings\":"<<spec.settings_json<<",\"coverage_start_sample\":"<<quote(std::to_string(spec.coverage_start))<<",\"coverage_end_sample\":"<<quote(std::to_string(spec.coverage_end))<<",\"complete\":"<<(result.complete?"true":"false")<<",\"state\":"<<quote(reason)<<",\"datasets\":[";
  for(size_t i=0;i<4;++i){if(i)out<<',';out<<"{\"file\":"<<quote(dataset_names[i])<<",\"snapshot_rows\":"<<sources[i].row_count<<",\"written_rows\":"<<result.rows_written[i]<<'}';}
  out<<"]\n}\n";out.flush();checked(out);out.close();checked(out);
@@ -152,7 +153,7 @@ BundleResult write_bundle(const fs::path& dir,const BundleSpec& spec,const std::
  manifest(dir,spec,sources,result,"incomplete");
  try{
   for(size_t kind=0;kind<4;++kind){
-   std::ofstream out(dir/dataset_names[kind],std::ios::binary);out<<sources[kind].header<<'\n';checked(out);
+   std::ofstream out(dir/dataset_names[kind],std::ios::binary);out.imbue(std::locale::classic());out<<sources[kind].header<<'\n';checked(out);
    for(uint64_t row=0;row<sources[kind].row_count;++row){
     if(cancelled&&cancelled()){out.flush();checked(out);manifest(dir,spec,sources,result,"cancelled");return result;}
     sources[kind].write_row(row,out);out<<'\n';checked(out);++result.rows_written[kind];

@@ -6,7 +6,9 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <stdexcept>
+#include <sstream>
 #include <vector>
 using namespace spdif;using namespace spdif::exports;namespace fs=std::filesystem;
 namespace {
@@ -56,6 +58,50 @@ void burst_tests(const fs::path& root){
  {BurstWriter w(root/"extended-type");auto b=begin();b.info.pc=uint16_t((b.info.pc&~127u)|0x21);w.burst(b);word(w,b,0,0x1234);word(w,b,1,0xabcd,4);end(w,b);w.finish();}expect(files(root/"extended-type",".bin")==0,"Seven-bit unsupported type cannot alias AC3");
  {BurstWriter w(root/"two");auto a=begin();w.burst(a);word(w,a,0,1);auto b=begin();b.info.start+=100;w.burst(b);word(w,b,0,0x1234);word(w,b,1,0xf123,4);end(w,b);w.finish();}expect(files(root/"two",".bin")==1&&read(root/"two"/"index.jsonl").find("new_header_before_payload_end")!=std::string::npos,"New header rejects old pending burst");
 }
+class HostileNumbers final : public std::numpunct<char> {
+ char do_decimal_point() const override { return ','; }
+ char do_thousands_sep() const override { return '#'; }
+ std::string do_grouping() const override { return "\1"; }
+};
+class GlobalLocaleGuard {
+ std::locale previous;
+public:
+ GlobalLocaleGuard():previous(std::locale()) {std::locale::global(std::locale(std::locale::classic(),new HostileNumbers));}
+ ~GlobalLocaleGuard(){std::locale::global(previous);}
+ GlobalLocaleGuard(const GlobalLocaleGuard&)=delete;
+ GlobalLocaleGuard& operator=(const GlobalLocaleGuard&)=delete;
+};
+void locale_tests(const fs::path& root){
+ const auto previous=std::locale();
+ {
+  GlobalLocaleGuard guard;
+  // Prove the facet is active rather than relying on installed OS locale names.
+  std::ostringstream probe;probe<<1234<<' '<<12.5;
+  expect(probe.str()=="1#2#3#4 1#2,5","Custom global numeric locale is active");
+  const auto wavdir=root/"locale-wav";
+  {WavWriter writer(wavdir,{49152000.5});status(writer);for(unsigned i=0;i<12;++i)pair(writer,i*4,0x800000,0x7fffff);writer.finish(23652);}
+  auto text=read(wavdir/"index.jsonl");
+  expect(text.find("\"capture_rate\":49152000.5")!=std::string::npos&&text.find("\"rate\":48000")!=std::string::npos,"WAV JSON numbers use classic decimal syntax");
+  expect(fs::exists(wavdir/"segment-000012.wav"),"WAV filenames never inherit digit grouping");
+  expect(text.find('#')==std::string::npos,"WAV index has no locale grouping separators");
+  expect(le(read(wavdir/"segment-000012.wav"),24,4)==48000,"Locale does not change binary WAV rate");
+  const auto burstdir=root/"locale-burst";
+  {BurstWriter writer(burstdir);for(unsigned i=0;i<12;++i){auto b=begin();b.info.start+=100*i;b.info.end+=100*i;b.info.evidence="control:"+std::string(1,char(31));writer.burst(b);word(writer,b,0,0x1234);word(writer,b,1,0xabcd,4);end(writer,b);}writer.finish();}
+  text=read(burstdir/"index.jsonl");
+  expect(text.find("\"Pc\":24577")!=std::string::npos&&text.find("\"declared_bits\":20")!=std::string::npos,"Burst index JSON integer formatting is locale independent");
+  expect(text.find("\\u001f")!=std::string::npos&&text.find('#')==std::string::npos,"JSON control escapes never contain locale punctuation");
+  expect(fs::exists(burstdir/"burst-000012.bin"),"Payload filenames never inherit digit grouping");
+  expect(read(burstdir/"burst-000012.bin")==std::string("\x12\x34\xa0\0",4),"Locale does not alter payload bytes");
+  std::array<CsvSource,4> sources;for(auto& source:sources){source.header="integer,real";source.row_count=12;source.write_row=[](uint64_t row,std::ostream& out){out<<1234+row<<','<<12.5;};}
+  BundleSpec spec;spec.capture_rate=49152000.5;spec.input_channel="D6";
+  const auto result=write_bundle(root/"locale-bundle",spec,sources);
+  expect(result.complete,"Bundle completes under a non-classic global locale");
+  text=read(root/"locale-bundle"/"manifest.json");
+  expect(text.find("\"capture_rate\":49152000.5")!=std::string::npos&&text.find("\"snapshot_rows\":12")!=std::string::npos&&text.find('#')==std::string::npos,"Bundle manifest numbers use JSON-compatible classic syntax");
+  expect(read(root/"locale-bundle"/"subframes.csv").find("integer,real\n1234,12.5\n") == 0,"CSV source cursors receive classic-locale streams");
+ }
+ expect(std::locale()==previous,"Global locale restored after export regression");
+}
 void core_integration(const fs::path& root){
  {BurstWriter writer(root/"core-burst");auto signal=fixture::content_signal(1,20,2);Sink sink;sink.burst=[&](const BurstEvent& e){writer.burst(e);};Decoder decoder({signal.capture,0},sink);for(auto edge:signal.edges)decoder.edge(edge);decoder.finish(signal.edges.back());writer.finish();}
  expect(read(root/"core-burst"/"burst-000001.bin")==std::string("\x0b\x77\x50\0",4),"Actual core streaming contract yields independent two-word payload bytes");
@@ -74,4 +120,4 @@ void bundle_tests(const fs::path& root){
  auto empty=sources;for(auto& source:empty)source.row_count=0;auto e=write_bundle(root/"empty",spec,empty);expect(e.complete&&e.rows_written==std::array<uint64_t,4>{},"Empty snapshot exports all headers");
 }
 }
-int main(){const auto root=fs::temp_directory_path()/("spdif-exports-"+std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));fs::create_directories(root);try{wav_tests(root);burst_tests(root);core_integration(root);bundle_tests(root);fs::remove_all(root);std::cout<<checks<<" export checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Export failure: "<<e.what()<<" (fixtures retained at "<<root<<")\n";return 1;}}
+int main(){const auto root=fs::temp_directory_path()/("spdif-exports-"+std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));fs::create_directories(root);try{wav_tests(root);burst_tests(root);core_integration(root);bundle_tests(root);locale_tests(root);fs::remove_all(root);std::cout<<checks<<" export checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Export failure: "<<e.what()<<" (fixtures retained at "<<root<<")\n";return 1;}}

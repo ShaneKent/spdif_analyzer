@@ -1,5 +1,21 @@
 # Validation record — 2026-11-11
 
+## Version 0.2 verification
+
+The feature suite builds the same SDK-independent decoder, analysis and export libraries used by Logic. Separate executables cover the original **131,997 decoder checks**, professional/cadence/streaming protocol extensions, **2,516 analysis checks**, and **95 export checks**. Python subprocess suites cover offline JSONL/policy behavior and two-stream comparison. The Windows build runs all six CTest targets; the DLL lifecycle harness additionally verifies all ten settings, v4 persistence, and migrations from v1/v2/v3.
+
+The portable export suite includes a deliberately hostile global C++ locale with decimal commas and digit grouping. JSON indexes/manifests, cursor CSV numbers, raw hexadecimal strings and generated filenames use explicit locale-independent formatting. Release and local ASan/UBSan export runs pass. Independent review also exercises periodic-stream ambiguity with invalid/missing timeline positions; missing samples must never manufacture a unique delay.
+
+Feature foundation commit `1c825d6` passed Windows, Linux, macOS 15 and sanitizer CI: [run 43132950806](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43132950806). Subsequent audit fixes require their own CI and native application evidence before release; this foundation run does not prove those later changes.
+
+A fresh 100 MS/s D6/D7 recording was acquired after rechecking the real Logic 8 connection. Each input produced **12,834 subframes and 64 confirmed status records**, with **zero parity failures and zero synchronization losses**. Both identify as consumer 48 kHz PCM with unspecified effective precision. Explicit 24-bit precision was used for numerical analysis, without claiming the source has 24 effective bits. Comparison across a ±16-frame search reported ambiguous alignment, with equal-valued accepted data at multiple offsets; no unique hardware delay was inferred. Partial offline endings remained explicit.
+
+The independent `SpdifTestSignal` module generates six native Logic fixtures: PCM ramp, status changes, AC3, DTS I, professional independent A/B PCM, and a Pa/Pb/Pc-only candidate. It has no production decoder/encoder dependency. The initial attempted demo shortcut left generic data in the capture; that recording was rejected as test evidence. The verified UI retake produced the expected transport waveform and confirmed AC3 with V=1 and parity intact in offline decoding. These transport payloads are intentionally synthetic, not codec-valid compressed audio.
+
+`scripts/smoke_features.py` validates actual Logic exports against those saved waveforms. Its acceptance checks include four-dataset manifest counts, health count agreement and retained windows, independent PCM mean/RMS, exact stereo WAV bytes and valid precision, changed-status masks, byte-exact payload extraction, and rejection of partial/non-PCM/independent-channel audio without the required evidence or assumption. The output report is complete only when it says `PASS`; files written before then are intermediate evidence. Raw captures and reports remain local.
+
+## Preserved v0.1 validation
+
 ## Automated verification
 
 The independent portable suite passes **131,997 checks** in GCC Release, Windows MSVC Release, and address/undefined-behavior sanitizer builds. It covers timing recovery, both polarities, the supported rate matrix, exact waveform field boundaries, status completeness, parity, faults and recovery, and IEC 61937 transport identification. See [fixture methodology](../tests/README.md).
