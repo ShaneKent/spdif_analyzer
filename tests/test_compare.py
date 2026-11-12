@@ -122,6 +122,76 @@ class CompareTests(unittest.TestCase):
             self.assertEqual(self.run_compare(a,b,expected=1)['status'],'ambiguous')
             self.assertEqual(self.run_compare(b,a,expected=1)['status'],'ambiguous')
 
+    def test_periodic_mutation_with_invalid_or_missing_positions_is_ambiguous(self):
+        values=[(1,2),(3,4)]*60;changed=list(values);changed[57]=(123,456)
+        for holes in ({'invalid':(40,)},{'drop':(40,)},{'drop':range(40,45)}):
+            a=self.jsonl('a.jsonl',values);b=self.jsonl('b.jsonl',changed,**holes)
+            self.assertEqual(self.run_compare(a,b,expected=1)['status'],'ambiguous')
+            self.assertEqual(self.run_compare(b,a,expected=1)['status'],'ambiguous')
+
+    def test_two_cycles_with_error_cannot_force_a_whole_cycle_delay(self):
+        period=sequence(64);values=period*2;changed=list(values);changed[57]=(123,456)
+        a=self.jsonl('a.jsonl',values);b=self.jsonl('b.jsonl',changed,invalid=(40,))
+        self.assertEqual(self.run_compare(a,b,'--max-lag','70',expected=1)['status'],'ambiguous')
+        self.assertEqual(self.run_compare(b,a,'--max-lag','70',expected=1)['status'],'ambiguous')
+
+    def test_truncated_second_cycle_still_has_strong_repetition_constraints(self):
+        period=sequence(64);values=(period*2)[:-1];changed=list(values);changed[57]=(123,456)
+        a=self.jsonl('a.jsonl',values);b=self.jsonl('b.jsonl',changed,invalid=(40,))
+        self.assertEqual(self.run_compare(a,b,'--max-lag','70',expected=1)['status'],'ambiguous')
+        self.assertEqual(self.run_compare(b,a,'--max-lag','70',expected=1)['status'],'ambiguous')
+        # A few equal intro/outro values are not evidence that an otherwise
+        # unique complete clip repeats over a near-full-length period.
+        unique=sequence(120);unique[-3:]=unique[:3]
+        a=self.jsonl('unique-a.jsonl',unique);b=self.jsonl('unique-b.jsonl',unique)
+        self.run_compare(a,b)
+
+    def test_periodicity_with_holes_in_both_inputs_uses_original_positions(self):
+        values=[(1,2),(3,4)]*60;changed=list(values);changed[57]=(123,456)
+        a=self.jsonl('a.jsonl',values,drop=(20,))
+        b=self.jsonl('b.jsonl',changed,drop=(40,))
+        self.assertEqual(self.run_compare(a,b,expected=1)['status'],'ambiguous')
+        self.assertEqual(self.run_compare(b,a,expected=1)['status'],'ambiguous')
+        # Sparse periodic evidence: known indices0,2,4,... carry a period-four
+        # sequence. Joining them would incorrectly report period two.
+        values=[(1,2),(11,12),(3,4),(13,14)]*40
+        a=self.jsonl('a.jsonl',values,drop=range(1,len(values),2))
+        b=self.jsonl('b.jsonl',values,drop=range(1,len(values),2))
+        report=self.run_compare(a,b,'--max-lag','0',expected=1)
+        self.assertEqual(report['status'],'ambiguous')
+        self.assertEqual(report['repetition_period_frames'],4)
+
+    def test_sparse_period_not_visible_in_most_common_anchor(self):
+        # Independent residue classes: period100 repeats B/C/D across cycles;
+        # the more common A occurs only at0/10/20 in the first cycle.
+        values=[(0,0)]*200
+        observed={0:(1,1),10:(1,1),20:(1,1),30:(2,2),40:(3,3),50:(4,4),
+                  130:(2,2),140:(3,3),150:(4,4),199:(5,5)}
+        for index,value in observed.items():values[index]=value
+        a=self.csv('sparse.csv',values,invalid=[i for i in range(200) if i not in observed])
+        report=self.run_compare(a,a,'--max-lag','0','--min-overlap','3','--rate','48000','--bits','16',expected=1)
+        self.assertEqual(report['status'],'ambiguous');self.assertEqual(report['repetition_period_frames'],100)
+
+    def test_sparse_period_requires_later_pairs_not_first_anchor_differences(self):
+        values=[(0,0)]*200
+        observed={0:(1,1),10:(2,2),30:(1,1),40:(2,2),60:(1,1),70:(2,2),
+                  130:(1,1),140:(2,2),160:(1,1),170:(2,2),199:(3,3)}
+        for index,value in observed.items():values[index]=value
+        a=self.csv('later-pairs.csv',values,invalid=[i for i in range(200) if i not in observed])
+        report=self.run_compare(a,a,'--max-lag','0','--min-overlap','3','--rate','48000','--bits','16',expected=1)
+        self.assertEqual(report['status'],'ambiguous')
+        self.assertIn(report['repetition_period_frames'],(100,130))
+        # Break the other valid P130 witness while retaining P100. This makes
+        # later A/B pairs essential even after allowing partial-cycle periods.
+        observed[5]=(9,9);observed[135]=(10,10)
+        for index,value in observed.items():values[index]=value
+        a=self.csv('later-pairs-only.csv',values,invalid=[i for i in range(200) if i not in observed])
+        report=self.run_compare(a,a,'--max-lag','0','--min-overlap','3','--rate','48000','--bits','16',expected=1)
+        self.assertEqual(report['status'],'ambiguous');self.assertEqual(report['repetition_period_frames'],100)
+        # Search itself fits this budget; the additional all-pairs ambiguity
+        # audit must fail explicitly rather than silently calling it unique.
+        self.run_compare(a,a,'--max-lag','0','--min-overlap','3','--rate','48000','--bits','16','--max-work','201',expected=2)
+
     def test_layout_rate_rejected(self):
         values=sequence();a=self.jsonl('a.jsonl',values)
         self.run_compare(a,self.jsonl('b.jsonl',values,bits=24),expected=2)

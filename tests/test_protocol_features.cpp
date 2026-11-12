@@ -2,6 +2,7 @@
 // References: https://raw.githubusercontent.com/torvalds/linux/master/include/sound/asoundef.h
 // https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavformat/spdifdec.c
 // https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/ac3defs.h
+// https://d3uzseaevmutz1.cloudfront.net/pubs/appNote/an22.pdf (Tables2/3)
 // Burst bytes remain original transport words; valid_bits counts HIGH significant
 // bits of the final word. These fixtures do not validate codec CRC/decompression.
 #include "Fixtures.h"
@@ -53,6 +54,20 @@ static void layouts(){
  b[1]=4;check(!spdif::status_info(b).supported&&!spdif::status_info(b).layout.known,"unsupported single channel conservative");
  b[1]=2;b[2]=0x32;x=spdif::status_info(b);check(x.word_length==16,"professional coord20 code6 means16 not17");
  b[2]=0x34;check(spdif::status_info(b).word_length==20,"professional coord24 code6 means20 not21");
+ // Independent byte2 literal table from ALSA IEC958 professional definitions:
+ // coordination2=20-bit main,4=24-bit main; source codes2/4/5/6.
+ const unsigned professional_lengths[][2]={{0x12,18},{0x22,19},{0x2a,20},{0x32,16},
+                                            {0x14,22},{0x24,23},{0x2c,24},{0x34,20}};
+ for(const auto& vector:professional_lengths){
+  b[2]=uint8_t(vector[0]);const auto info=spdif::status_info(b);
+  check(info.word_length==vector[1]&&info.layout.known&&info.layout.bits==vector[1],"handchecked professional source-length table");
+  check(spdif::pcm_value(0x800000,info.layout)==-int32_t(uint32_t(1)<<(vector[1]-1)),"professional word-length signed minimum");
+  check(spdif::interpret_status(b).find("word_length="+std::to_string(vector[1]))!=std::string::npos,"professional length rendered without consumer mapping");
+ }
+ for(unsigned coordination:{2u,4u})for(unsigned source_code:{0u,1u,3u,7u}){
+  b[2]=uint8_t(coordination|(source_code<<3));check(!spdif::status_info(b).layout.known,"unimplemented or not-indicated professional source-length codes remain unknown");
+ }
+ b[2]=0x0a;check(!spdif::status_info(b).layout.known,"professional source code1 not consumer word-length code1");
  b[2]=0x28;check(!spdif::status_info(b).layout.known,"missing professional coordination unknown");
  b[2]=0x2c;b[0]|=2;check(!spdif::status_info(b).layout.known,"non-audio cannot imply PCM layout");
  b={};b[4]=2;x=spdif::status_info(b);check(x.word_length==16&&x.layout.known,"consumer16 declared");
@@ -185,4 +200,35 @@ static void pending_header_snapshot(){
  decoder.finish(signal.edges.back());check(!decoder.pending_header(),"finished decoder has no partial header snapshot");
 }
 
-int main(){try{layouts();trusted_layout();streaming();cadence();interleaved_cadence();pending_header_snapshot();std::cout<<"PASS "<<checks<<" protocol feature checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL "<<checks<<": "<<e.what()<<'\n';return 1;}}
+
+static void professional_reliability(){
+ // Cirrus AN22 Table3: byte22 bit4 marks bytes0..5 unreliable; bits5..7
+ // describe other groups and do not invalidate the audio-format fields.
+ std::array<uint8_t,24> good{};good[0]=0x85;good[1]=2;good[2]=0x2c;
+ auto bad=good;bad[22]=0x10;
+ const auto unreliable=spdif::status_info(bad);
+ check(!unreliable.audio_fields_reliable&&!unreliable.supported&&!unreliable.layout.known,"explicit unreliable professional audio fields are not trusted");
+ check(unreliable.word_length==24&&unreliable.sample_rate==48000,"untrusted raw field interpretation preserved");
+ check(spdif::interpret_status(bad).find("audio_fields_reliable=false")!=std::string::npos,"professional reliability is visible");
+ for(unsigned mask:{1u,2u,4u,8u,32u,64u,128u,224u}){
+  auto other=good;other[22]=uint8_t(mask);const auto info=spdif::status_info(other);
+  check(info.audio_fields_reliable&&info.supported&&info.layout.known,"other reliability groups do not invalidate audio fields");
+ }
+ auto consumer=good;consumer[0]=4;consumer[4]=0x0b;consumer[22]=0x10;
+ check(spdif::status_info(consumer).audio_fields_reliable&&spdif::status_info(consumer).layout.known,"professional reliability meaning never leaks to consumer mode");
+ Signal signal(100000000,48000);
+ for(unsigned frame=0;frame<800;++frame)for(unsigned ch=0;ch<2;++ch){
+  const auto& bytes=frame>=192&&frame<384?bad:good;unsigned pos=frame%192;
+  signal.subframe(ch?'W':pos?'M':'B',raw(0,false,false,(bytes[pos/8]>>(pos%8))&1));
+ }
+ auto result=run(signal);
+ check(result.frames.at(220*2).content==spdif::ContentFormat::Pcm&&result.frames.at(220*2).layout.known,"reliable professional baseline classified");
+ check(result.frames.at(372*2).content==spdif::ContentFormat::Unknown&&!result.frames.at(372*2).layout.known,"incoming unreliable bit immediately clears stale evidence");
+ check(result.frames.at(400*2).content==spdif::ContentFormat::Unknown,"unreliable confirmed block stays unknown");
+ check(result.frames.at(576*2).content==spdif::ContentFormat::Pcm&&result.frames.at(576*2).layout.known,"fresh reliable complete block restores PCM evidence");
+ auto addresses=good;addresses[6]=0x41;addresses[14]=1;addresses[18]=2;addresses[22]=0xe0;addresses[23]=0x37;
+ result=run(transport(600,{},good,addresses,192));
+ check(std::all_of(result.frames.begin()+384,result.frames.end(),[](const spdif::Subframe& f){return f.content==spdif::ContentFormat::Pcm&&f.layout.known&&f.layout.bits==24;}),"professional addresses other reliability flags and unchecked CRC changes keep audio classification continuous");
+}
+
+int main(){try{layouts();trusted_layout();streaming();cadence();interleaved_cadence();pending_header_snapshot();professional_reliability();std::cout<<"PASS "<<checks<<" protocol feature checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL "<<checks<<": "<<e.what()<<'\n';return 1;}}

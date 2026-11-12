@@ -11,6 +11,7 @@ Exit: 0 unique exact overlap; 1 mismatch/holes/ambiguity/insufficient evidence;
 from __future__ import annotations
 
 import argparse
+from math import gcd
 import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, getcontext
@@ -282,9 +283,9 @@ def timeline(source, rate, widths, args):
     return result
 
 
-def periodic(values):
+def minimal_period(values):
     if not values:
-        return False
+        return 0
     prefix = [0] * len(values)
     for i in range(1, len(values)):
         j = prefix[i - 1]
@@ -293,8 +294,98 @@ def periodic(values):
         if values[i] == values[j]:
             j += 1
         prefix[i] = j
-    period = len(values) - prefix[-1]
-    return period * 3 <= len(values)
+    return len(values) - prefix[-1]
+
+
+def indexed_period(frames, low, high, budget, min_constraints=3):
+    """Find exact repetitive evidence without joining values across time holes.
+
+    Candidate periods come from actual runs/repeated-value positions. Every
+    candidate is checked against ORIGINAL frame-index residues; compressed known
+    values are only a candidate generator. Validation is charged to a shared
+    budget so sparse/repetitive adversarial data cannot cause unbounded work.
+    """
+    known = [(index, frames[index][0]) for index in sorted(frames)
+             if low <= index <= high and frames[index][0] is not None]
+    if len(known) < 3:
+        return None
+    values = [value for _, value in known]
+    span = known[-1][0] - known[0][0] + 1
+    period = minimal_period(values)
+    if span == len(known):
+        constraints = len(known) - period
+        return period if (constraints >= min_constraints or (period * 2 <= len(known) and constraints >= 3)) else None
+    maximum = span - 1
+    known_map = dict(known)
+    if not maximum:
+        return None
+    # Longest actual contiguous run often reveals the period despite a missing
+    # sample elsewhere. It is a proposal, not permission to compress holes.
+    run_start = best_start = 0
+    best_length = 1
+    for i in range(1, len(known) + 1):
+        if i == len(known) or known[i][0] != known[i - 1][0] + 1:
+            if i - run_start > best_length:
+                best_start, best_length = run_start, i - run_start
+            run_start = i
+    proposals = []
+    run = values[best_start:best_start + best_length]
+    run_period = minimal_period(run)
+    if run_period and run_period < len(run):
+        proposals.append(run_period)
+    if period < len(known):
+        proposals.append(known[period][0] - known[0][0])
+    positions_by_value = {}
+    for index, value in known:
+        positions_by_value.setdefault(value, []).append(index)
+    repeated = sorted((positions for positions in positions_by_value.values() if len(positions) >= 2),
+                      key=len, reverse=True)
+    seen = set()
+    # Consider every repeated value. The most common value may appear only in
+    # the first cycle while less common values reveal the true cross-cycle lag.
+    # Fallback pair generation and candidate validation share a hard work budget.
+    def candidates():
+        yield from proposals
+        for positions in repeated:
+            common = 0
+            for position in positions[1:]:
+                if budget[0] < 1:
+                    raise InputError("Periodicity candidate generation exceeds --max-work; narrow the interval/lag or increase the work budget")
+                budget[0] -= 1
+                common = gcd(common, position - positions[0])
+            yield common
+            # Later pairs may reveal a period absent from every first-anchor
+            # difference. Charge generation as well as validation, including
+            # duplicates, so ALL-pair enumeration has a hard work bound.
+            for first in range(len(positions) - 1):
+                for second in range(first + 1, len(positions)):
+                    if budget[0] < 1:
+                        raise InputError("Periodicity candidate generation exceeds --max-work; narrow the interval/lag or increase the work budget")
+                    budget[0] -= 1
+                    difference = positions[second] - positions[first]
+                    if difference > maximum:
+                        break
+                    yield difference
+    for candidate_period in candidates():
+        if not 1 <= candidate_period <= maximum or candidate_period in seen:
+            continue
+        seen.add(candidate_period)
+        if budget[0] < 2 * len(known):
+            raise InputError("Periodicity audit exceeds --max-work; narrow the interval/lag or increase the work budget")
+        budget[0] -= 2 * len(known)
+        residues = {}
+        consistent = True
+        for index, value in known:
+            residue = index % candidate_period
+            if residue in residues and residues[residue] != value:
+                consistent = False
+                break
+            residues[residue] = value
+        if consistent:
+            constraints = sum(known_map.get(index + candidate_period) == value for index, value in known)
+            if constraints >= min_constraints or (candidate_period * 2 <= span and constraints >= 3):
+                return candidate_period
+    return None
 
 
 def candidate(a, b, lag, bounds):
@@ -354,9 +445,22 @@ def compare(a, b, args):
                                        "a_start_seconds": str(pair_a[0].time), "b_start_seconds": str(pair_b[0].time),
                                        "a_start_sample": pair_a[0].sample, "b_start_sample": pair_b[0].sample})
     constant = all(value == values[0] for value in values) or all(value == other_values[0] for value in other_values)
-    repeating = score["hole_frames"] == 0 and (periodic(values) or periodic(other_values))
+    periodicity_budget = [args.max_work - probes]
+    # Audit the full selected sources as well as the winning overlap: an edge
+    # lag can otherwise crop a two-cycle source down to one unique-looking cycle.
+    intervals = [(a, min(a), max(a)), (b, min(b), max(b))]
+    if (low, high) != (min(a), max(a)):
+        intervals.append((a, low, high))
+    if (low + lag, high + lag) != (min(b), max(b)):
+        intervals.append((b, low + lag, high + lag))
+    repeating = None
+    if not constant:
+        for source_frames, first, last in intervals:
+            repeating = indexed_period(source_frames, first, last, periodicity_budget, args.min_overlap)
+            if repeating:
+                break
     if constant or repeating:
-        return {"status": "ambiguous", "reason": "Constant or repetitive content cannot establish a unique delay", "candidates": [score]}, 1
+        return {"status": "ambiguous", "reason": "Constant or repetitive content cannot establish a unique delay", "repetition_period_frames": 1 if constant else repeating, "repetition_period_note": "One consistent observed period witness, not necessarily the fundamental period", "candidates": [score]}, 1
     holes, cursor = [], low
     for position in valid_positions:
         if position > cursor and len(holes) < args.max_mismatches:

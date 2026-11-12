@@ -56,6 +56,22 @@ void unsupported_status_diff(){
  check(out.changes.size()==1&&out.changes[0].previous[3]==15&&out.changes[0].current[3]==14,"unsupported status differences preserve raw numeric codes");
  check(std::none_of(out.changes[0].fields.begin(),out.changes[0].fields.end(),[](const FieldChange& f){return f.name=="emphasis"||f.name=="sample_rate_hz";}),"unsupported consumer mode does not inherit mode-zero semantics");
 }
+void professional_reliability_baselines(){
+ const auto professional=[](uint64_t index,uint8_t flags=0){auto b=block(index);b.c={};b.c[0]=0x85;b.c[1]=2;b.c[2]=0x2c;b.c[22]=flags;return b;};
+ Collected out;Analysis a({1000,1},out.sink());a.add(professional(0));auto unreliable=professional(1,0x10);unreliable.c[0]=0x45;a.add(unreliable);a.add(professional(2));
+ check(out.changes.empty(),"professional explicitly unreliable audio fields cannot create or bridge trusted changes");
+ auto real_change=professional(3);real_change.c[0]=0x45;a.add(real_change);a.finish(1536);
+ check(out.changes.size()==1&&out.changes[0].previous_start==768&&out.changes[0].start==1152,"first reliable block after unreliability is baseline, subsequent real change compares normally");
+ check(std::any_of(out.changes[0].fields.begin(),out.changes[0].fields.end(),[](const FieldChange& f){return f.name=="sample_rate_hz"&&f.old_value=="48000"&&f.new_value=="44100";}),"post-recovery professional rate change remains semantic");
+ auto summary=a.summary();check(summary.channels[0].status_good==4&&summary.channels[0].status_damaged==0,"professional reliability is separate from raw parity/structural status health");
+ for(uint8_t flag:{uint8_t(1),uint8_t(2),uint8_t(4),uint8_t(8),uint8_t(0x20),uint8_t(0x40),uint8_t(0x80)}){
+  Collected retained;Analysis b({1000,1},retained.sink());b.add(professional(0));b.add(professional(1,flag));auto changed=professional(2,flag);changed.c[0]=0x45;b.add(changed);b.finish(1152);
+  check(retained.changes.size()==2&&retained.changes.back().previous_start==384,"unrelated professional reliability flags preserve audio-field baseline");
+  check(std::any_of(retained.changes.back().fields.begin(),retained.changes.back().fields.end(),[](const FieldChange&f){return f.name=="sample_rate_hz"&&f.old_value=="48000"&&f.new_value=="44100";}),"unrelated reliability flags do not erase subsequent interpreted transitions");
+ }
+ Collected pcm;Analysis flushing({6144000,1},pcm.sink());for(unsigned i=0;i<4;++i)flushing.add(frame(i,17));check(pcm.pcm.empty(),"PCM remains open before unreliable status arrives");
+ flushing.add(professional(1,0x10));check(pcm.pcm.size()==1&&pcm.pcm[0].channel==0,"unreliable professional status flushes only its channel PCM segment");flushing.finish(768);
+}
 void pcm_statistics(){Collected out;Analysis a({6144000,1},out.sink());const int32_t values[]={-32768,32767,0,0};for(unsigned i=0;i<8;++i)a.add(frame(i,i%2?100:values[i/2]));a.finish(512);
  const auto found=std::find_if(out.pcm.begin(),out.pcm.end(),[](const PcmWindow&p){return p.channel==0&&p.accepted;});check(found!=out.pcm.end(),"PCM per-channel statistics emitted");const auto& p=*found;
  check(p.accepted==4&&p.bits==16&&p.minimum==-32768&&p.maximum==32767&&p.peak==32768,"declared16-bit extrema and peak");near(p.mean,-.25,1e-12,"PCM mean/DC in integer units");near(p.rms,std::sqrt((32768.*32768+32767.*32767)/4),1e-9,"independent RMS");near(p.peak_normalized,1,1e-12,"normalized digital full scale");
@@ -167,4 +183,4 @@ void boundaries(){Collected out;uint64_t origin=uint64_t(1)<<54;Analysis a({1000
  for(double rate:{1e30,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}){bool bad=false;try{Analysis extreme({rate,1},{});}catch(const std::invalid_argument&){bad=true;}check(bad,"out-of-range capture rates rejected before timestamp conversion");}
 }
 }
-int main(){try{health();holes_and_faults();differences();unsupported_status_diff();pcm_statistics();exclusions_override_and_reset();excluded_samples_share_window();rate_layout_matrix();diagnostic_only_stream();pending_candidate_watermark();decoder_integration();status_source_end();invalid_rate_measurements();snapshots();boundaries();std::cout<<"PASS analysis "<<checks<<" checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL analysis after "<<checks<<": "<<e.what()<<'\n';return 1;}}
+int main(){try{health();holes_and_faults();differences();unsupported_status_diff();professional_reliability_baselines();pcm_statistics();exclusions_override_and_reset();excluded_samples_share_window();rate_layout_matrix();diagnostic_only_stream();pending_candidate_watermark();decoder_integration();status_source_end();invalid_rate_measurements();snapshots();boundaries();std::cout<<"PASS analysis "<<checks<<" checks\n";return 0;}catch(const std::exception&e){std::cerr<<"FAIL analysis after "<<checks<<": "<<e.what()<<'\n';return 1;}}

@@ -255,7 +255,10 @@ struct Decoder::Impl {
     unsigned pos=block_count/2; f.block_position=int(pos); auto& b=blocks[f.channel];
     b.c[pos/8]|=uint8_t(f.status<<(pos%8)); b.u[pos/8]|=uint8_t(f.user<<(pos%8));
     b.integrity &= f.parity_ok; ++block_count;
-    if(content_mode>=0 && f.parity_ok && f.status!=bool((known_status[f.channel][pos/8]>>(pos%8))&1))
+    // Professional addresses/other reliability groups/CRC may change while
+    // bytes0..5 remain trustworthy. Consumer status stays conservative.
+    const bool audio_status_bit=!known_professional || pos<48 || pos==180;
+    if(content_mode>=0 && audio_status_bit && f.parity_ok && f.status!=bool((known_status[f.channel][pos/8]>>(pos%8))&1))
      unknown_content(f.start,"Current channel status differs from previous confirmed block");
    }
   }

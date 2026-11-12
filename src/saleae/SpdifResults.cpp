@@ -112,7 +112,7 @@ U64 SpdifResults::PublishPending(const spdif::Subframe& s){
    v.AddString("channel",stereo?(b.channel?"B / right":"A / left"):(b.channel?"B":"A"));
    v.AddByteArray("C",b.c.data(),b.c.size());v.AddByteArray("U",b.u.data(),b.u.size());
    v.AddInteger("coverage_start_sample",b.start);v.AddInteger("coverage_end_sample",b.end);
-   v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddString("interpretation",b.interpretation.c_str());
+   v.AddBoolean("complete",true);v.AddBoolean("integrity",b.integrity);v.AddBoolean("audio_fields_reliable",spdif::status_info(b.c).audio_fields_reliable);v.AddString("interpretation",b.interpretation.c_str());
    AddFrameV2(v,"channel_status",cursor,cursor);
   }else if(event.type==ContentType){
    const auto& c=event.content;

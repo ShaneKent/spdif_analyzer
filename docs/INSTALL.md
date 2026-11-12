@@ -42,6 +42,8 @@ If automatic acquisition produces no samples, inspect the selected channel, digi
 
 Logic automation exports took roughly 55–70 seconds per request in this environment, even for short recordings. Keep the same request running while it progresses; repeated exports create more work. This observed application/API latency is separate from the decoder-core throughput reported in the validation record.
 
+Separately timed v0.2 fixture checks located most of that delay in `add_analyzer` (36–68 seconds in these observations); completed bundle/report/file exports then took approximately 0.1–0.6 seconds for those short captures. This does not promise the same timings for other captures or eliminate host setup latency.
+
 ## Reproducing the feature integration checks
 
 The default test-enabled SDK build also produces `SpdifTestSignal` in `build-win/TestAnalyzers/Release`. This independent QA module is never installed or included in the production ZIP. In a separate Logic profile, add both this directory and the production analyzer directory to custom analyzer paths, restart, and enable automation on a separate port (the harness defaults to 10431).
@@ -55,3 +57,5 @@ python scripts/smoke_features.py <fixture-directory> --port 10431 --output artif
 ```
 
 The output directory must not already exist. The script opens and closes new capture tabs, acquires no hardware, and verifies the exports against the known fixture behavior. `--only pcm changes` selects a subset for diagnosis. Synthetic AC3/DTS payloads exercise transport identification and extraction; they are not codec-valid compressed audio.
+
+`--resume` reuses complete exports and refuses to overwrite incomplete or failed ones. `--verify-only` rechecks existing artifacts without importing the automation package or opening Logic; its separate `verification-report.json` must say `PASS`. The checks account for every source subframe as either exported PCM or an explicit exclusion and compare declared audio precision rather than treating auxiliary bits as audio.

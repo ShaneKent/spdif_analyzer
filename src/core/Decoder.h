@@ -16,7 +16,7 @@ struct SampleLayout {
  unsigned bits=0; bool known=false,stereo=false,professional=false;
 };
 struct StatusInfo {
- bool professional=false,supported=false,non_audio=false,stereo=false;
+ bool professional=false,supported=false,non_audio=false,stereo=false,audio_fields_reliable=true;
  unsigned channel_mode=0,emphasis_code=0,sample_rate=0,word_length=0;
  SampleLayout layout{};
 };

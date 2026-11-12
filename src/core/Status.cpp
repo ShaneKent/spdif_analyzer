@@ -14,7 +14,8 @@ StatusInfo status_info(const std::array<uint8_t,24>& b) {
  StatusInfo info;info.professional=(b[0]&1)!=0;info.non_audio=(b[0]&2)!=0;
  unsigned maximum=0,code=0;
  if(info.professional){
-  info.channel_mode=b[1]&15;info.supported=info.channel_mode==2 || info.channel_mode==8;
+  info.channel_mode=b[1]&15;info.audio_fields_reliable=(b[22]&0x10)==0;
+  info.supported=(info.channel_mode==2 || info.channel_mode==8)&&info.audio_fields_reliable;
   info.stereo=info.channel_mode==2;info.emphasis_code=(b[0]>>2)&7;
   const unsigned rates[]={0,44100,48000,32000};info.sample_rate=rates[b[0]>>6];
   switch(b[2]&7){case 2:maximum=20;break;case 4:maximum=24;break;default:break;}
@@ -48,6 +49,7 @@ std::string interpret_status(const std::array<uint8_t,24>& b) {
   s<<"; channel_mode=";switch(info.channel_mode){case 0:s<<"not indicated";break;case 2:s<<"stereophonic (A left / B right)";break;case 4:s<<"single channel (unsupported)";break;case 8:s<<"two independent channels A/B";break;case 12:s<<"primary/secondary (unsupported)";break;case 15:s<<"byte-3 extension (unsupported)";break;default:s<<"unknown("<<info.channel_mode<<")";}
   s<<"; sample_coordination="<<unsigned(b[2]&7)<<"; word_length=";
   if(info.word_length)s<<info.word_length;else s<<"unknown (coordination="<<unsigned(b[2]&7)<<", code="<<unsigned((b[2]>>3)&7)<<")";
+  s<<"; audio_fields_reliable="<<(info.audio_fields_reliable?"true":"false (bytes 0..5 declared unreliable)");
   s<<"; status_crc=not checked";return s.str();
  }
  s<<"consumer; ";

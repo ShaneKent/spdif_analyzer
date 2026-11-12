@@ -179,6 +179,10 @@ struct Analysis::Impl {
    if(!have_parity_fault[block.channel]||last_parity_fault[block.channel]<block.start||last_parity_fault[block.channel]>block.end){fault(channel,block.start,block.end);fault(all,block.start,block.end);}
    have_status[block.channel]=false;pcm_flush(block.channel);metadata_observed(at);return;}
   const auto ch=block.channel;
+  // Structural/parity integrity remains visible in health, but professional
+  // audio-field reliability is separate evidence. Never compare interpretations
+  // through a block which explicitly disclaims bytes 0..5.
+  if(!status_info(block.c).audio_fields_reliable){have_status[ch]=false;pcm_flush(ch);metadata_observed(at);return;}
   if(have_status[ch] && baseline[ch].end!=UINT64_MAX && baseline[ch].end+1==block.start && baseline[ch].c!=block.c){
    StatusChange change;change.channel=ch;change.previous_start=baseline[ch].start;change.previous_end=after(baseline[ch].end);
    change.start=block.start;change.end=after(block.end);change.previous=baseline[ch].c;change.current=block.c;
