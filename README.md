@@ -1,8 +1,8 @@
 # S/PDIF Analyzer for Saleae Logic 2
 
-Native digital S/PDIF decoder for Windows x64, with a portable C++17 decoder core. Development is in progress; release validation will be documented before completion.
+Native digital S/PDIF decoder for Windows x64, with a portable C++17 decoder core. Windows build, native loading, simulated waveform decoding, and exported sample verification have passed. See the validation record for remaining platform and hardware checks.
 
-The first release targets automatic BMC clock recovery, B/M/W preambles in either polarity, raw and signed sample containers, V/U/C/P flags, parity and stream diagnostics, separate channel-status blocks, and CSV exports. WAV and IEC 61937 decoding are outside this release.
+The first release targets automatic BMC clock recovery, B/M/W preambles in either polarity, raw and signed sample containers, V/U/C/P flags, parity and stream diagnostics, separate channel-status blocks, and CSV exports. IEC 61937 transport identification recognizes AC-3 (Dolby Digital), DTS types I/II/III, and E-AC-3 (Dolby Digital Plus). WAV export and decompression of compressed audio are outside this release.
 
 ## Build
 
@@ -29,3 +29,29 @@ ctest --test-dir build-core --output-on-failure
 - [Saleae Analyzer SDK](https://github.com/saleae/AnalyzerSDK) and [sample analyzer](https://github.com/saleae/SampleAnalyzer): native plugin interface and build guidance. SDK remains a separate build dependency; see its licensing information.
 - [TI McASP guide](https://www.ti.com/lit/pdf/spruf91), pages 18–20: S/PDIF framing, preambles, parity and clock relationship.
 - [Linux ALSA interface definitions](https://github.com/torvalds/linux/blob/master/include/sound/asoundef.h): cross-reference for consumer channel-status fields; implementation does not copy kernel code.
+
+## Install and inspect
+
+See [installation and capture requirements](docs/INSTALL.md), [result and CSV definitions](docs/RESULTS.md), and the [validation record](docs/VALIDATION.md). Only digitized S/PDIF is supported; coaxial/optical receiver conditioning is external.
+
+The native Windows DLL is `build-win/Analyzers/Release/SpdifAnalyzer.dll` when using `scripts/build_windows.ps1`. Package it with `python scripts/package.py`; the ignored `artifacts` directory receives a ZIP and SHA-256 checksum.
+
+`benchmark_decoder` measures one minute of 192 kHz traffic with a counting sink. It is separate from ordinary CTest runs. Cross-platform build and sanitizer checks are configured in `.github/workflows/build.yml`.
+
+
+## Waveform fields and content
+
+The default **Fields** view annotates preamble, auxiliary bits, main audio field, validity V, user U, channel status C, and parity P separately at their actual decoded edge boundaries. **Waveform detail → Samples** selects a compact view. A parity failure is attached to the P field; V=1 is explicitly labeled invalid for conversion.
+
+PCM identification uses confirmed consumer channel status. Compressed-format identification uses IEC 61937 synchronization, type and length information, corroborated by non-audio channel status. Headers without confirmed status are provisional; disagreement with PCM status is a conflict. Codec names describe the transport type, not successful decompression or codec payload validation. See [result definitions](docs/RESULTS.md).
+
+For offline inspection of a Saleae digital transition CSV:
+
+```sh
+python scripts/csv_to_edges.py digital.csv --channel 6 --sample-rate 100000000 > edges.txt
+build-core/decode_edges 100000000 < edges.txt
+```
+
+The sample rate must match the original capture. This utility prints status, content evidence and diagnostic counts without retaining every sample. Raw captures remain local.
+
+To repeat the demo application check, configure this analyzer on D0 **before** starting a simulated capture, save the capture, install Saleae's `logic2-automation` package in a test environment, then run `python scripts/smoke_logic.py demo.sal --port 10430`. The API creates a new capture before analyzers are added; retake a demo capture in the configured tab so the plugin can supply its simulation waveform.
