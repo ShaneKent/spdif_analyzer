@@ -54,6 +54,10 @@ int main(int argc,char** argv){
  SimpleArchive version5;version5<<U32(5);version5<<c;version5<<U32(48000);version5<<S32(1);version5<<S32(1);version5<<S32(3);version5<<S32(7);version5<<U32(250);version5<<U32(20);version5<<U32(48000);version5<<bool(true);
  settings->LoadSettings(version5.GetString());
  if(output->GetNumber()!=7||window->GetInteger()!=250||bits->GetInteger()!=20||rate->GetInteger()!=48000||!stereo->GetValue()||detail->GetNumber()!=1||csv->GetNumber()!=3||!table->GetValue()){std::cerr<<"Version5 migration must preserve codec selection and default full structured rows\n";destroy(analyzer);return 1;}
+ output->SetNumber(6);table->SetValue(false);
+ if(!settings->SetSettingsFromInterfaces()){std::cerr<<"Unable to select enhanced existing CSV bundle\n";destroy(analyzer);return 1;}
+ std::string diagnostic=settings->SaveSettings();settings->LoadSettings(diagnostic.c_str());
+ if(output->GetNumber()!=6||table->GetValue()||settings->GetSettingsInterfacesCount()!=11){std::cerr<<"Enhanced CSV bundle must preserve archivev6/interfaces and sparse setting\n";destroy(analyzer);return 1;}
  std::cout<<"Loaded "<<name()<<"; entry points, create/destroy, archivev6 sparse-table round trip and v1/v2/v3/v4/v5 full-table migration passed\n";
  destroy(analyzer);FreeLibrary(dll);return 0;
 }

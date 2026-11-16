@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 namespace spdif::exports {
@@ -137,35 +138,72 @@ void BurstWriter::codec(const spdif::codec::CodecInfo& info){if(impl->done)throw
 void BurstWriter::finish(){if(impl->done)return;if(impl->active){auto info=impl->begin.info;info.end=impl->last_end;impl->end(info,false,"end_of_input_before_confirmation");}impl->index<<"{\"type\":\"finish\",\"complete\":true}\n";impl->index.flush();checked(impl->index);impl->index.close();checked(impl->index);impl->done=true;fs::remove(impl->dir/"INCOMPLETE");}
 namespace {
 const char* dataset_names[]={"subframes.csv","channel-status.csv","diagnostics.csv","content.csv"};
-void manifest(const fs::path& dir,const BundleSpec& spec,const std::array<CsvSource,4>& sources,const BundleResult& result,const std::string& reason){
+std::string folded(std::string value){for(char& c:value)if(c>='A'&&c<='Z')c=char(c-'A'+'a');return value;}
+bool safe_companion_name(const std::string& value){
+ if(value.empty()||value=="."||value==".."||value.back()=='.'||value.back()==' ')return false;
+ for(unsigned char c:value)if(c<32||c==127||std::string("/\\:\"<>|?*").find(char(c))!=std::string::npos)return false;
+ const auto stem=folded(value.substr(0,value.find('.')));
+ if(stem=="con"||stem=="prn"||stem=="aux"||stem=="nul")return false;
+ return !(stem.size()==4&&(stem.substr(0,3)=="com"||stem.substr(0,3)=="lpt")&&stem[3]>='1'&&stem[3]<='9');
+}
+void manifest(const fs::path& dir,const BundleSpec& spec,const std::array<CsvSource,4>& sources,const BundleResult& result,const std::string& reason,const std::vector<CompanionSource>& companions){
  const auto temp=dir/"manifest.json.tmp";
  std::ofstream out(temp,std::ios::binary);out.imbue(std::locale::classic());
  out<<"{\n  \"schema_version\":"<<quote(spec.schema_version)<<",\"analyzer_version\":"<<quote(spec.analyzer_version)<<",\"input_channel\":"<<quote(spec.input_channel)<<",\"capture_rate\":"<<std::setprecision(17)<<spec.capture_rate<<",\"settings\":"<<spec.settings_json<<",\"coverage_start_sample\":"<<quote(std::to_string(spec.coverage_start))<<",\"coverage_end_sample\":"<<quote(std::to_string(spec.coverage_end))<<",\"complete\":"<<(result.complete?"true":"false")<<",\"state\":"<<quote(reason)<<",\"datasets\":[";
  for(size_t i=0;i<4;++i){if(i)out<<',';out<<"{\"file\":"<<quote(dataset_names[i])<<",\"snapshot_rows\":"<<sources[i].row_count<<",\"written_rows\":"<<result.rows_written[i]<<'}';}
- out<<"]\n}\n";out.flush();checked(out);out.close();checked(out);
+ out<<']';
+ if(!companions.empty()){
+  out<<",\"diagnostic_bundle_version\":1,\"snapshot_id\":"<<quote(spec.snapshot_id)<<",\"companions\":[";
+  for(size_t i=0;i<companions.size();++i){if(i)out<<',';const auto& c=companions[i];out<<"{\"role\":"<<quote(c.role)<<",\"file\":"<<quote(c.file)<<",\"format\":"<<quote(c.format)<<",\"snapshot_records\":"<<c.record_count<<",\"written_records\":"<<result.companion_written[i]<<",\"complete\":"<<(result.companion_complete[i]?"true":"false")<<'}';}
+  out<<']';
+ }
+ out<<"\n}\n";out.flush();checked(out);out.close();checked(out);
  // INCOMPLETE remains throughout replacement. A consumer must require both a
  // complete manifest and absence of this marker; failures cannot look complete.
  if(fs::exists(dir/"manifest.json"))fs::remove(dir/"manifest.json");
  fs::rename(temp,dir/"manifest.json");
 }
 }
-BundleResult write_bundle(const fs::path& dir,const BundleSpec& spec,const std::array<CsvSource,4>& sources,std::function<bool()> cancelled){
+BundleResult write_bundle(const fs::path& dir,const BundleSpec& spec,const std::array<CsvSource,4>& sources,std::function<bool()> cancelled,const std::vector<CompanionSource>& companions){
  if(!(spec.capture_rate>0)||!std::isfinite(spec.capture_rate)||spec.coverage_end<spec.coverage_start)throw std::invalid_argument("Invalid bundle capture metadata");
  if(spec.settings_json.empty()||spec.settings_json.front()!='{'||spec.settings_json.back()!='}')throw std::invalid_argument("settings_json must be a JSON object");
  for(const auto& s:sources)if(s.row_count&&!s.write_row)throw std::invalid_argument("Missing bundle source cursor");
- new_dir(dir);BundleResult result;
- manifest(dir,spec,sources,result,"incomplete");
+ if(!companions.empty()&&spec.snapshot_id.empty())throw std::invalid_argument("Diagnostic companions require a snapshot ID");
+ if(!companions.empty()&&companions.size()!=4)throw std::invalid_argument("Diagnostic v1 requires all four companion reports");
+ const char* companion_roles[]={"health","pcm","status_changes","codecs"};
+ const char* companion_files[]={"health.json","pcm.jsonl","status-changes.jsonl","codec-frames.jsonl"};
+ std::set<std::string> roles,filenames{"manifest.json","manifest.json.tmp","incomplete"};
+ for(const auto* name:dataset_names)filenames.insert(folded(name));
+ for(const auto& c:companions){
+  unsigned role=0;while(role<4&&c.role!=companion_roles[role])++role;
+  // Reject separators on every OS, drive/stream syntax, reserved metadata,
+  // duplicate destinations, and callbacks that could silently omit records.
+  if(role==4||c.file!=companion_files[role]||c.format!=(role==0?"json":"jsonl")||!roles.insert(c.role).second||!safe_companion_name(c.file)||!filenames.insert(folded(c.file)).second||
+     !c.record_count||(c.format=="json"&&c.record_count!=1)||!c.write_record)throw std::invalid_argument("Invalid diagnostic companion source");
+ }
+ new_dir(dir);BundleResult result;result.companion_written.resize(companions.size());result.companion_complete.resize(companions.size(),false);
+ manifest(dir,spec,sources,result,"incomplete",companions);
  try{
   for(size_t kind=0;kind<4;++kind){
    std::ofstream out(dir/dataset_names[kind],std::ios::binary);out.imbue(std::locale::classic());out<<sources[kind].header<<'\n';checked(out);
    for(uint64_t row=0;row<sources[kind].row_count;++row){
-    if(cancelled&&cancelled()){out.flush();checked(out);manifest(dir,spec,sources,result,"cancelled");return result;}
+    if(cancelled&&cancelled()){out.flush();checked(out);manifest(dir,spec,sources,result,"cancelled",companions);return result;}
     sources[kind].write_row(row,out);out<<'\n';checked(out);++result.rows_written[kind];
    }
    out.flush();checked(out);out.close();checked(out);
   }
-  if(cancelled&&cancelled()){manifest(dir,spec,sources,result,"cancelled");return result;}
-  result.complete=true;manifest(dir,spec,sources,result,"complete");fs::remove(dir/"INCOMPLETE");return result;
- }catch(...){result.complete=false;try{manifest(dir,spec,sources,result,"failed");}catch(...){}throw;}
+  for(size_t i=0;i<companions.size();++i){
+   const auto& c=companions[i];
+   if(cancelled&&cancelled()){manifest(dir,spec,sources,result,"cancelled",companions);return result;}
+   std::ofstream out(dir/c.file,std::ios::binary);out.imbue(std::locale::classic());checked(out);
+   for(uint64_t row=0;row<c.record_count;++row){
+    if((cancelled&&cancelled())||!c.write_record(row,out,cancelled)){out.flush();checked(out);manifest(dir,spec,sources,result,"cancelled",companions);return result;}
+    out<<'\n';checked(out);++result.companion_written[i];
+   }
+   out.flush();checked(out);out.close();checked(out);result.companion_complete[i]=true;
+  }
+  if(cancelled&&cancelled()){manifest(dir,spec,sources,result,"cancelled",companions);return result;}
+  result.complete=true;manifest(dir,spec,sources,result,"complete",companions);fs::remove(dir/"INCOMPLETE");return result;
+ }catch(...){result.complete=false;try{manifest(dir,spec,sources,result,"failed",companions);}catch(...){}throw;}
 }
 }

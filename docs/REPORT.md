@@ -11,6 +11,22 @@ python scripts/capture_report.py analysis.bundle -o capture.html \
 
 The primary input is either the offline decoder's version-1 JSONL (`decode_edges ... --jsonl`) or the analyzer's four-CSV bundle directory. Optional inputs are the existing capture-health JSON object, PCM-statistics and status-change JSONL exports, and a version-1 PCM comparison report. These files should describe the same capture represented by the primary input; comparison source A supplies the reference axis. No extension settings or original exports are modified.
 
+## Diagnostic snapshot packages
+
+From version 0.4, **Export output → Analysis CSV bundle** writes a complete diagnostic package to `<selected filename>.bundle`. It retains the original four CSV files and adds `health.json`, `pcm.jsonl`, `status-changes.jsonl`, and `codec-frames.jsonl`. All eight files use one frozen analyzer snapshot. No additional export selection or analyzer setup is needed for these companions.
+
+```sh
+python scripts/capture_report.py capture.bundle -o capture.html
+```
+
+The report automatically loads only the four companions declared by the manifest. Their snapshot ID, input channel, analyzer version, capture rate, settings and exact source coverage must agree. Counts include JSONL metadata records; a health document counts as one top-level record, with its nested windows still consuming the report's record budget. These checks identify accidental mixing; a snapshot ID is not cryptographic authentication. CSV timestamps retain their trigger-relative precision, while companions retain exact source sample indices.
+
+Legacy four-CSV bundles still work. Optional `--health`, `--pcm`, `--status-changes`, and `--codecs` are available for older exports; do not supply a role already included by the diagnostic package. Separately exported legacy companions lack a common snapshot identity and must be selected carefully. `--comparison` remains a separate PCM comparison report.
+
+An interrupted package retains `INCOMPLETE` and an incomplete manifest. Completed CSVs and completed companions remain inspectable; unfinished companions, including torn JSON, are omitted with an explicit warning. A successfully written package is still a **live snapshot**: pending codec prefixes and current PCM windows are not a fabricated capture-end confirmation. Packages include metadata rather than WAV or compressed payload files; those retain their separate integrity-gated export choices.
+
+The additive `diagnostic_bundle_version: 1` extension leaves manifest `schema_version: "1"` and its four `datasets` entries unchanged. Its `companions` entries record role, fixed filename, format, `snapshot_records`, `written_records`, and per-file `complete`. Existing output directories are never overwritten. Both the final complete manifest and absence of `INCOMPLETE` are required for a completed transaction.
+
 The view combines format/status evidence, faults, health windows, PCM statistics, IEC bursts, codec-frame evidence and relative-delay windows on one timeline. Drag to pan, scroll to zoom, or use the range controls. Event-type switches filter the plot and table. Search examines all retained sparse event fields. The table has 100 rows per page; filtering and pagination do not remove records from the report. Enable **Table follows visible range** to limit the table to the current viewport.
 
 Select a row or a plotted event to inspect its full record. Exact source capture indices remain decimal strings, including values above JavaScript's 53-bit integer limit. Use those source timestamps to locate the corresponding position manually in Logic. The report does not assume automatic control of Logic navigation.

@@ -1,5 +1,20 @@
 # Validation record — 2026-11-11
 
+## Version 0.4 diagnostic packages (2026-11-16)
+
+The enhanced package writer passes 118 strict portable checks and local ASan/UBSan checks. Cases include cancellation inside health JSON after all CSVs finish, torn JSONL records, companion failures, safe fixed roles/filenames, exact counts, immutable CSV contents and locale independence. Local leak detection was disabled because of the traced sandbox; this is not a leak-check pass. Independent review found no remaining writer/snapshot defect. The report suite passes 39 tests including automatic companions, mixed snapshots, forged row context, frozen coverage, codec source/transport containment, duplicate roles, counts, incomplete files and shared budgets.
+
+The Windows x64 DLL passes the actual native loader, eleven settings interfaces, archive v6/output6 persistence, and v1–v5 migrations. Actual Logic 2.4.48 tests use an isolated profile and saved captures, with no hardware acquisition or source changes. One export per case produced all four CSVs and all four report companions, with matching IDs/provenance/counts and no incomplete marker:
+
+| Saved capture | Path / waveform detail | Subframes | Status blocks | Generated report sparse events |
+| --- | --- | ---: | ---: | ---: |
+| PCM/status changes | D0 / Samples | 13,086 | 68 | 128 |
+| Physical AC-3 | D6 / Fields | 25,668 | 132 | 286 |
+| Physical AC-3 with PCM/header conflict | D7 / Samples | 25,668 | 132 | 244 |
+| Physical DTS | D6 / Samples | 19,251 | 98 | 329 |
+
+Every package generated its HTML report without companion arguments. D6 AC-3 subframes retain the previous exact CSV SHA-256 `15ed0e8285e03507952f989332c5837f7ecfb8fc5fad66ede8aba31c45e15ba4`; its eight codec records equal the independently checked offline reference. Report generation succeeded on native Windows; these data-ingestion tests do not claim new browser interaction coverage. Existing Linux/macOS GUI limitations and host export-cancellation limitations remain unchanged.
+
 ## Version 0.3 verification
 
 The foundation `4548dad` passed Windows x64, Linux x64, macOS arm64, sanitizer and bounded fuzz CI: [run 43147061216](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147061216). A real release-workflow dispatch also passed all platform tests, sanitizer/fuzz gates and aggregate package validation: [run 43147752973](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147752973). Its three production packages were independently downloaded and checked for actual binary architecture, source/SDK provenance, exact approved members, and internal/external hashes. Dispatch did not publish a release; these runs precede subsequent native-validation changes.

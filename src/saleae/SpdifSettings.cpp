@@ -16,7 +16,7 @@ SpdifSettings::SpdifSettings() {
  export_ui.AddNumber(2,"Diagnostics", "Errors and partial-block evidence with original timestamps.");
  export_ui.AddNumber(3,"Content classification", "PCM/non-PCM classification and IEC 61937 burst evidence.");
  AddInterface(&channel_ui); AddInterface(&rate_ui); AddInterface(&display_ui); AddInterface(&detail_ui); AddInterface(&export_ui);
- output_ui.SetTitleAndTooltip("Export output", "Choose CSV, analysis reports, WAV, payload files, or a single CSV bundle.");
+ output_ui.SetTitleAndTooltip("Export output", "Choose CSV, analysis reports, WAV, payload files, or an Analysis CSV bundle containing all four CSVs plus health, PCM, status-change and codec reports from one snapshot.");
  const char* outputs[]={"Selected CSV","Health summary JSON","Status changes JSONL","PCM statistics JSONL","PCM WAV","IEC61937 payloads","Analysis CSV bundle","Codec frames JSONL"};
  for(int i=0;i<8;++i)output_ui.AddNumber(i,outputs[i],outputs[i]);
  window_ui.SetTitleAndTooltip("Analysis window (ms)","Time window for health and PCM statistics.");window_ui.SetMin(1);window_ui.SetMax(3600000);

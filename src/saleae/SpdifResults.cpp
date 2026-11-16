@@ -2,10 +2,13 @@
 #include "report/Events.h"
 #include "report/CodecEvents.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <random>
 #include <sstream>
 namespace {
 constexpr U8 PreambleType=0,AuxType=1,MainType=2,VType=3,UType=4,CType=5,PType=6,SampleType=7;
@@ -16,8 +19,14 @@ char preamble(const Frame& f){return char(f.mData2&255);}
 unsigned channel(const Frame& f){return preamble(f)=='W'?1:0;}
 bool parity_ok(uint32_t raw){unsigned n=0;for(unsigned i=0;i<28;++i)n+=(raw>>i)&1;return (n&1)==0;}
 Frame frame(U8 type,uint64_t start,uint64_t end){Frame f;f.mType=type;f.mFlags=0;f.mData1=0;f.mData2=0;f.mStartingSampleInclusive=start;f.mEndingSampleInclusive=std::max(start,end);return f;}
+std::string instance_id(){
+ std::ostringstream out;out.imbue(std::locale::classic());out<<std::hex<<std::setfill('0');
+ try{std::random_device random;for(unsigned i=0;i<4;++i)out<<std::setw(8)<<uint32_t(random());}
+ catch(...){static std::atomic<uint64_t> sequence{0};out.str("");out<<uint64_t(std::chrono::system_clock::now().time_since_epoch().count())<<'-'<<uint64_t(std::chrono::steady_clock::now().time_since_epoch().count())<<'-'<<++sequence;}
+ return out.str(); // Opaque grouping identity, not a capture hash/signature.
 }
-SpdifResults::SpdifResults(SpdifAnalyzer* a,SpdifSettings* s):analyzer(a),settings(s){}
+}
+SpdifResults::SpdifResults(SpdifAnalyzer* a,SpdifSettings* s):analyzer(a),settings(s){analysis_id=instance_id();}
 void SpdifResults::Add(const spdif::Subframe& s){
  last_decoded_end=s.end;
  auto f=frame(SampleType,s.start,s.end); f.mData1=uint64_t(s.raw)|(uint64_t(s.content)<<32)|(uint64_t(s.layout.bits&31)<<40)|(uint64_t(s.layout.known)<<45)|(uint64_t(s.layout.stereo)<<46)|(uint64_t(s.layout.professional)<<47);

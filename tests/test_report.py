@@ -269,6 +269,142 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('start_sample', data['events'][0]['record'])
         self.assertIn('CSV precision', data['events'][0]['time_basis'])
 
+    def diagnostic_bundle(self):
+        directory = self.bundle()
+        path = directory / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest.update(analyzer_version='0.4.0', input_channel='D6', snapshot_id='test-snapshot-1',
+                        diagnostic_bundle_version=1, companions=[])
+        context = dict(snapshot_id=manifest['snapshot_id'], analyzer_version=manifest['analyzer_version'],
+                       input_channel='D6', capture_rate_hz=CAPTURE, origin_sample='980',
+                       coverage_start_sample='980', coverage_end_sample_inclusive='999',
+                       settings=manifest['settings'], live_snapshot=True)
+        sources = {
+            'health': ('health.json', 'json', [event('summary', **context, health_windows=[
+                event('health_window', start_sample='980', end_sample_exclusive='1000', channels=[])])]),
+            'pcm': ('pcm.jsonl', 'jsonl', [event('metadata', **context),
+                event('pcm_window', start_sample='980', end_sample_exclusive='1000', channel=0, accepted=1)]),
+            'status_changes': ('status-changes.jsonl', 'jsonl', [event('metadata', **context),
+                event('status_change', start_sample='980', end_sample_exclusive='1000', channel=0)]),
+            'codecs': ('codec-frames.jsonl', 'jsonl', [event('metadata', **context),
+                event('codec_frame', source_interval_known=False, transport_start_sample='980',
+                      transport_end_sample_inclusive='999', codec='AC-3')])}
+        for role, (name, form, records) in sources.items():
+            (directory / name).write_text('\n'.join(json.dumps(row) for row in records) + '\n', encoding='utf8')
+            manifest['companions'].append(dict(role=role, file=name, format=form,
+                snapshot_records=len(records), written_records=len(records), complete=True))
+        path.write_text(json.dumps(manifest), encoding='utf8')
+        return directory
+
+    def test_diagnostic_bundle_discovers_all_companions_once(self):
+        data, _ = self.run_report(self.diagnostic_bundle())
+        self.assertEqual(data['stats']['subframes'], 2)
+        for kind in ('health_window', 'pcm_window', 'status_change', 'codec_frame'):
+            self.assertEqual(sum(row['kind'] == kind for row in data['events']), 1, kind)
+        self.assertEqual(len(data['sources']), 5)
+        self.assertTrue(any('live snapshot' in note for note in data['notes']))
+
+    def test_diagnostic_bundle_rejects_mixed_provenance(self):
+        directory = self.diagnostic_bundle()
+        target = directory / 'pcm.jsonl'
+        original = target.read_text()
+        for key, value in (('snapshot_id', 'different'), ('input_channel', 'D7'),
+                           ('analyzer_version', '0.3.0'), ('capture_rate_hz', CAPTURE * 2),
+                           ('coverage_end_sample_inclusive', '1001'), ('origin_sample', '981'),
+                           ('settings', {'trigger_sample': '999'})):
+            rows = [json.loads(line) for line in original.splitlines()]
+            rows[0][key] = value
+            target.write_text('\n'.join(json.dumps(row) for row in rows))
+            self.assertIn('provenance mismatch', self.run_report(directory, expected=2).stderr, key)
+
+    def test_diagnostic_bundle_rejects_duplicate_explicit_companion(self):
+        directory = self.diagnostic_bundle()
+        self.assertIn('already supplies pcm', self.run_report(directory, '--pcm', directory / 'pcm.jsonl', expected=2).stderr)
+
+    def test_diagnostic_bundle_counts_and_missing_files(self):
+        directory = self.diagnostic_bundle()
+        path = directory / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['companions'][1]['snapshot_records'] = 3
+        manifest['companions'][1]['written_records'] = 3
+        path.write_text(json.dumps(manifest))
+        self.assertIn('written-record count mismatch', self.run_report(directory, expected=2).stderr)
+        manifest['companions'][1].update(snapshot_records=2, written_records=2)
+        path.write_text(json.dumps(manifest))
+        (directory / 'pcm.jsonl').unlink()
+        self.assertIn('missing or linked', self.run_report(directory, expected=2).stderr)
+
+    def test_diagnostic_bundle_incomplete_torn_companion_is_omitted(self):
+        directory = self.diagnostic_bundle()
+        path = directory / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['complete'] = False
+        manifest['companions'][0].update(complete=False, written_records=0)
+        path.write_text(json.dumps(manifest))
+        (directory / 'health.json').write_text('{"torn":')
+        (directory / 'INCOMPLETE').touch()
+        data, _ = self.run_report(directory)
+        self.assertFalse(any(row['kind'] == 'health_window' for row in data['events']))
+        self.assertTrue(any('companion omitted: health.json' in note for note in data['notes']))
+        manifest['complete'] = True
+        path.write_text(json.dumps(manifest))
+        self.assertIn('incomplete companion', self.run_report(directory, expected=2).stderr)
+
+    def test_diagnostic_bundle_rejects_paths_unknown_roles_and_events(self):
+        directory = self.diagnostic_bundle()
+        path = directory / 'manifest.json'
+        original = path.read_text()
+        for key, value in (('file', '../pcm.jsonl'), ('role', 'unknown'), ('format', 'csv')):
+            manifest = json.loads(original)
+            manifest['companions'][1][key] = value
+            path.write_text(json.dumps(manifest))
+            self.run_report(directory, expected=2)
+        path.write_text(original)
+        target = directory / 'pcm.jsonl'
+        rows = [json.loads(line) for line in target.read_text().splitlines()]
+        rows[1]['event'] = 'subframe'
+        target.write_text('\n'.join(json.dumps(row) for row in rows))
+        self.assertIn('Unexpected diagnostic companion event', self.run_report(directory, expected=2).stderr)
+
+    def test_diagnostic_bundle_companions_share_report_budgets(self):
+        directory = self.diagnostic_bundle()
+        # Four CSV rows plus metadata/summary/nested records all consume the
+        # shared budget; companions never bypass existing report limits.
+        self.assertIn('record budget', self.run_report(directory, '--max-records', '7', expected=2).stderr)
+
+    def test_diagnostic_bundle_rejects_forged_row_context_or_coverage(self):
+        directory = self.diagnostic_bundle()
+        target = directory / 'pcm.jsonl'
+        original = target.read_text()
+        for change, message in (({'snapshot_id': 'another'}, 'provenance mismatch'),
+                                ({'input_channel': 'D7'}, 'provenance mismatch'),
+                                ({'start_sample': '1000000', 'end_sample_exclusive': '2000000'}, 'frozen source coverage')):
+            rows = [json.loads(line) for line in original.splitlines()]
+            rows[1].update(change)
+            target.write_text('\n'.join(json.dumps(row) for row in rows))
+            self.assertIn(message, self.run_report(directory, expected=2).stderr)
+
+    def test_diagnostic_bundle_rejects_outside_nested_health_window(self):
+        directory = self.diagnostic_bundle()
+        target = directory / 'health.json'
+        record = json.loads(target.read_text())
+        record['health_windows'][0]['end_sample_exclusive'] = '1001'
+        target.write_text(json.dumps(record))
+        self.assertIn('frozen source coverage', self.run_report(directory, expected=2).stderr)
+
+    def test_diagnostic_bundle_bounds_both_codec_intervals(self):
+        directory = self.diagnostic_bundle()
+        target = directory / 'codec-frames.jsonl'
+        original = target.read_text()
+        for change, message in ((dict(source_interval_known=True, start_sample='980', end_sample_inclusive='989',
+                                      transport_start_sample='1000000', transport_end_sample_inclusive='2000000'), 'transport exceeds'),
+                                (dict(source_interval_known=True, start_sample='980', end_sample_inclusive='999',
+                                      transport_start_sample='985'), 'source interval exceeds')):
+            rows = [json.loads(line) for line in original.splitlines()]
+            rows[1].update(change)
+            target.write_text('\n'.join(json.dumps(row) for row in rows))
+            self.assertIn(message, self.run_report(directory, expected=2).stderr)
+
     def test_bundle_count_mismatch_and_missing_complete_dataset(self):
         directory=self.bundle();manifest=json.loads((directory/'manifest.json').read_text())
         manifest['datasets'][0]['written_rows']=3;(directory/'manifest.json').write_text(json.dumps(manifest))

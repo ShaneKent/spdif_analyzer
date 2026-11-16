@@ -1,5 +1,6 @@
 #include "export/Exports.h"
 #include "ContentTests.h"
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -119,5 +120,42 @@ void bundle_tests(const fs::path& root){
  thrown=false;try{write_bundle(root/"bundle",spec,sources);}catch(const std::runtime_error&){thrown=true;}expect(thrown,"Existing output never overwritten");
  auto empty=sources;for(auto& source:empty)source.row_count=0;auto e=write_bundle(root/"empty",spec,empty);expect(e.complete&&e.rows_written==std::array<uint64_t,4>{},"Empty snapshot exports all headers");
 }
+void diagnostic_bundle_tests(const fs::path& root){
+ std::array<CsvSource,4> sources;
+ for(unsigned k=0;k<4;++k){sources[k].header="row,value";sources[k].row_count=k+1;sources[k].write_row=[k](uint64_t row,std::ostream& out){out<<row<<",dataset-"<<k;};}
+ BundleSpec spec;spec.capture_rate=100000000;spec.input_channel="D6";spec.coverage_start=9007199254740993ull;spec.coverage_end=9007199254741999ull;spec.snapshot_id="analysis-123-456";
+ const auto make=[&]{
+  std::vector<CompanionSource> c;
+  const char* roles[]={"health","pcm","status_changes","codecs"};const char* names[]={"health.json","pcm.jsonl","status-changes.jsonl","codec-frames.jsonl"};
+  for(unsigned i=0;i<4;++i){CompanionSource item;item.role=roles[i];item.file=names[i];item.format=i?"jsonl":"json";item.record_count=i+1;
+   item.write_record=[&,i](uint64_t row,std::ostream& out,const std::function<bool()>& stop){if(stop&&stop())return false;out<<"{\"snapshot_id\":\""<<spec.snapshot_id<<"\",\"record\":"<<row<<",\"role\":"<<i<<'}';return true;};c.push_back(std::move(item));}
+  return c;
+ };
+ auto companions=make();const auto result=write_bundle(root/"diagnostic",spec,sources,{},companions);
+ expect(result.complete&&result.rows_written==std::array<uint64_t,4>{1,2,3,4},"Enhanced bundle retains exactly four CSV datasets/counts");
+ expect(result.companion_written==std::vector<uint64_t>({1,2,3,4})&&std::all_of(result.companion_complete.begin(),result.companion_complete.end(),[](bool x){return x;}),"Companion counts include metadata and multiple live-prefix records");
+ auto text=read(root/"diagnostic"/"manifest.json");
+ expect(text.find("\"diagnostic_bundle_version\":1")!=std::string::npos&&text.find("\"snapshot_id\":\"analysis-123-456\"")!=std::string::npos,"Diagnostic version and shared frozen identity recorded");
+ expect(text.find("\"snapshot_records\":4,\"written_records\":4,\"complete\":true")!=std::string::npos,"Codec prefix may contain multiple records, not an assumed single tail");
+ expect(read(root/"diagnostic"/"subframes.csv")=="row,value\n0,dataset-0\n","Enhanced bundle preserves existing raw CSV bytes");
+ expect(!fs::exists(root/"diagnostic"/"INCOMPLETE")&&files(root/"diagnostic",".jsonl")==3,"All companion outputs close before completion marker removal");
+ unsigned calls=0;auto during_health=make();during_health[0].write_record=[&](uint64_t,std::ostream& out,const std::function<bool()>& stop){out<<"{\"health_windows\":[";for(unsigned i=0;i<4;++i){++calls;if(stop&&stop())return false;out<<(i?",{}":"{}");}out<<"]}";return true;};
+ auto r=write_bundle(root/"cancel-health",spec,sources,[&]{return calls>=2;},during_health);
+ expect(!r.complete&&r.rows_written==std::array<uint64_t,4>{1,2,3,4},"Cancellation can occur after every CSV finished");
+ expect(r.companion_written[0]==0&&!r.companion_complete[0]&&fs::exists(root/"cancel-health"/"INCOMPLETE"),"Partially streamed health JSON is zero whole records and explicitly incomplete");
+ text=read(root/"cancel-health"/"manifest.json");expect(text.find("\"state\":\"cancelled\"")!=std::string::npos&&text.find("\"written_records\":0,\"complete\":false")!=std::string::npos,"Health cancellation manifest is explicit, later companions stay incomplete");
+ auto during_pcm=make();during_pcm[1].write_record=[&](uint64_t row,std::ostream& out,const std::function<bool()>&){out<<"{\"row\":"<<row;if(row==1)return false;out<<'}';return true;};
+ r=write_bundle(root/"cancel-pcm",spec,sources,{},during_pcm);
+ expect(!r.complete&&r.companion_complete[0]&&!r.companion_complete[1]&&r.companion_written[1]==1,"Torn JSONL final record is not counted; already closed health remains complete");
+ auto failure=make();failure[2].write_record=[](uint64_t,std::ostream& out,const std::function<bool()>&)->bool{out<<"partial";throw std::runtime_error("injected companion failure");};bool threw=false;
+ try{write_bundle(root/"failed-companion",spec,sources,{},failure);}catch(const std::runtime_error&){threw=true;}
+ expect(threw&&fs::exists(root/"failed-companion"/"INCOMPLETE")&&read(root/"failed-companion"/"manifest.json").find("\"state\":\"failed\"")!=std::string::npos,"Companion I/O/callback failure never advertises complete after successful CSVs");
+ for(unsigned test=0;test<11;++test){auto invalid=make();auto metadata=spec;switch(test){case 0:metadata.snapshot_id.clear();break;case 1:invalid.pop_back();break;case 2:invalid[1].role="health";break;case 3:invalid[0].file="../health.json";break;case 4:invalid[0].file="MANIFEST.JSON";break;case 5:invalid[0].file="CON.json";break;case 6:invalid[0].file="health.json ";break;case 7:invalid[1].format="json";break;case 8:invalid[0].record_count=2;break;case 9:invalid[1].record_count=0;break;case 10:invalid[0].write_record={};break;}
+  const auto dest=root/("invalid-companion-"+std::to_string(test));threw=false;try{write_bundle(dest,metadata,sources,{},invalid);}catch(const std::invalid_argument&){threw=true;}
+  expect(threw&&!fs::exists(dest),"Invalid companion contract rejected before creating any files");
+ }
+ {GlobalLocaleGuard guard;auto c=make();const auto locale=write_bundle(root/"diagnostic-locale",spec,sources,{},c);expect(locale.complete&&read(root/"diagnostic-locale"/"manifest.json").find("\"snapshot_records\":4")!=std::string::npos,"Diagnostic manifest counts remain locale-independent");}
 }
-int main(){const auto root=fs::temp_directory_path()/("spdif-exports-"+std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));fs::create_directories(root);try{wav_tests(root);burst_tests(root);core_integration(root);bundle_tests(root);locale_tests(root);fs::remove_all(root);std::cout<<checks<<" export checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Export failure: "<<e.what()<<" (fixtures retained at "<<root<<")\n";return 1;}}
+
+}
+int main(){const auto root=fs::temp_directory_path()/("spdif-exports-"+std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));fs::create_directories(root);try{wav_tests(root);burst_tests(root);core_integration(root);bundle_tests(root);diagnostic_bundle_tests(root);locale_tests(root);fs::remove_all(root);std::cout<<checks<<" export checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Export failure: "<<e.what()<<" (fixtures retained at "<<root<<")\n";return 1;}}

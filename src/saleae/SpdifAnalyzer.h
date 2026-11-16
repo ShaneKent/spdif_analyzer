@@ -64,6 +64,7 @@ private:
   U64 trigger=0;
   bool assume_stereo=false,table_samples=true,ready=false;
   std::string settings_json;
+  std::string snapshot_id;
  };
  Snapshot published_snapshot{};
  Snapshot Freeze();
@@ -72,6 +73,10 @@ private:
  std::string CsvHeader(unsigned) const;
  void CsvRow(unsigned,U64,std::ostream&,const Snapshot&);
  void ExportOutput(const char*,const Snapshot&);
+ std::vector<spdif::codec::CodecInfo> PrefixCodecs(const Snapshot&);
+ uint64_t ReportRecords(unsigned,const Snapshot&,size_t prefix_count) const;
+ bool WriteReportRecord(unsigned,uint64_t,std::ostream&,const Snapshot&,
+  const std::vector<spdif::codec::CodecInfo>&,const std::function<bool()>&);
  std::string Text(const Frame&);
  SpdifAnalyzer* analyzer; SpdifSettings* settings;
  struct Notification { U8 type; size_t index; };
@@ -88,6 +93,8 @@ private:
  spdif::HealthWindow health_summary{};
  std::vector<BurstRecord> burst_records;
  std::vector<spdif::codec::CodecInfo> codec_events;
+ std::string analysis_id;
+ U64 snapshot_sequence=0;
 };
 class SpdifAnalyzer final : public Analyzer2 {
 public:

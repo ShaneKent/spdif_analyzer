@@ -16,6 +16,9 @@ import tempfile
 UINT64_MAX = (1 << 64) - 1
 DATASETS = {'subframes.csv': 'subframe', 'channel-status.csv': 'channel_status',
             'diagnostics.csv': 'diagnostic', 'content.csv': 'content'}
+COMPANIONS = {'health': ('health.json', 'json'), 'pcm': ('pcm.jsonl', 'jsonl'),
+              'status_changes': ('status-changes.jsonl', 'jsonl'),
+              'codecs': ('codec-frames.jsonl', 'jsonl')}
 
 
 class ReportError(ValueError):
@@ -137,6 +140,7 @@ class Builder:
         self.primary_metadata_seen = False
         self.active_source = ''
         self.first_subframe = self.last_subframe = None
+        self.bundle_roles = set()
 
     def read_text(self, path):
         try:
@@ -418,6 +422,114 @@ class Builder:
                 self.add({'schema_version': 1, 'event': kind, **row}, True)
             if name in expected and count != expected[name]:
                 raise ReportError('Bundle written-row count mismatch: ' + name)
+        if 'diagnostic_bundle_version' in manifest:
+            self.diagnostic_companions(directory, manifest)
+
+    def diagnostic_companions(self, directory, manifest):
+        """Only manifest-listed, same-snapshot evidence may be merged automatically."""
+        if integer(manifest['diagnostic_bundle_version'], 'diagnostic_bundle_version') != 1:
+            raise ReportError('Unsupported diagnostic bundle version')
+        snapshot_id = manifest.get('snapshot_id')
+        if not isinstance(snapshot_id, str) or not snapshot_id or len(snapshot_id) > 256:
+            raise ReportError('Diagnostic bundle requires a bounded snapshot_id')
+        entries = manifest.get('companions')
+        if not isinstance(entries, list) or len(entries) != len(COMPANIONS):
+            raise ReportError('Diagnostic bundle requires all four companion roles')
+        complete = boolean(manifest.get('complete', False))
+        seen = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ReportError('Invalid diagnostic companion entry')
+            role = entry.get('role')
+            if role not in COMPANIONS or role in seen:
+                raise ReportError('Unknown or duplicate diagnostic companion role')
+            seen.add(role)
+            name, form = COMPANIONS[role]
+            if entry.get('file') != name or entry.get('format') != form:
+                raise ReportError('Unexpected diagnostic companion file or format')
+            snapshot = integer(entry['snapshot_records'], 'snapshot_records')
+            written = integer(entry['written_records'], 'written_records')
+            file_complete = boolean(entry.get('complete', False))
+            if not 0 <= written <= snapshot or file_complete and written != snapshot:
+                raise ReportError('Diagnostic companion record count mismatch: ' + name)
+            if complete and not file_complete:
+                raise ReportError('Complete diagnostic bundle has an incomplete companion: ' + name)
+            self.bundle_roles.add(role)
+            path = directory / name
+            # An interrupted health object or JSONL line may be malformed. Keep
+            # it on disk as evidence, but never display it as completed analysis.
+            if not file_complete:
+                self.notes.append('Incomplete diagnostic companion omitted: ' + name)
+                continue
+            if not path.is_file() or path.is_symlink():
+                raise ReportError('Complete diagnostic companion is missing or linked: ' + name)
+            if written > self.args.max_records - self.records:
+                raise ReportError('Input record budget exceeded (--max-records)')
+            text = self.read_text(path)
+            if form == 'json':
+                records = [strict_json(text)]
+            else:
+                records = (strict_json(line) for line in text.splitlines() if line.strip())
+            records = iter(records)
+            context = next(records, None)
+            if not isinstance(context, dict):
+                raise ReportError('Diagnostic companion requires initial context: ' + name)
+            wanted = {'snapshot_id': snapshot_id, 'analyzer_version': manifest['analyzer_version'],
+                      'input_channel': manifest['input_channel'], 'settings': manifest['settings']}
+            if any(context.get(key) != value for key, value in wanted.items()):
+                raise ReportError('Diagnostic companion snapshot provenance mismatch: ' + name)
+            if (decimal(context.get('capture_rate_hz')) != decimal(manifest['capture_rate']) or
+                    index(context.get('origin_sample')) != index(manifest['coverage_start_sample']) or
+                    index(context.get('coverage_start_sample')) != index(manifest['coverage_start_sample']) or
+                    index(context.get('coverage_end_sample_inclusive')) != index(manifest['coverage_end_sample'])):
+                raise ReportError('Diagnostic companion coverage provenance mismatch: ' + name)
+            expected_event = 'summary' if role == 'health' else 'metadata'
+            if context.get('event') != expected_event:
+                raise ReportError('Unexpected diagnostic companion context: ' + name)
+            self.active_source = name
+            allowed = {'health': {'summary'}, 'pcm': {'metadata', 'pcm_window'},
+                       'status_changes': {'metadata', 'status_change'},
+                       'codecs': {'metadata', 'codec_frame'}}[role]
+            from itertools import chain
+            count = 0
+            for i, record in enumerate(chain((context,), records)):
+                count += 1
+                if count > written:
+                    raise ReportError('Diagnostic companion written-record count mismatch: ' + name)
+                if (not isinstance(record, dict) or record.get('event') not in allowed or
+                        i and record.get('event') == 'metadata'):
+                    raise ReportError('Unexpected diagnostic companion event: ' + name)
+                self.companion_record_context(record, manifest)
+                if role == 'health' and any(not isinstance(window, dict) or window.get('event') != 'health_window'
+                                          for window in record.get('health_windows', [])):
+                    raise ReportError('Unexpected nested health event: ' + name)
+                if role == 'health':
+                    for window in record.get('health_windows', []):
+                        self.companion_record_context(window, manifest)
+                self.add(record)
+            if count != written:
+                raise ReportError('Diagnostic companion written-record count mismatch: ' + name)
+            self.sources.append({'path': str(path), 'kind': role, 'snapshot_id': snapshot_id})
+
+    def companion_record_context(self, record, manifest):
+        # Data records normally inherit their file's initial metadata. Explicit
+        # contradictory context must never override that snapshot provenance.
+        for key in ('snapshot_id', 'analyzer_version', 'input_channel', 'settings'):
+            if key in record and record[key] != manifest[key]:
+                raise ReportError('Diagnostic companion record provenance mismatch: ' + self.active_source)
+        if ('capture_rate_hz' in record and decimal(record['capture_rate_hz']) != self.rate or
+                'origin_sample' in record and index(record['origin_sample']) != index(manifest['coverage_start_sample'])):
+            raise ReportError('Diagnostic companion record provenance mismatch: ' + self.active_source)
+        low, high, _ = self.interval(record)
+        if low is not None and (low < self.declared_low or high > self.declared_high):
+            raise ReportError('Diagnostic companion interval exceeds frozen source coverage: ' + self.active_source)
+        if record.get('event') == 'codec_frame':
+            start = self.sample_time(record['transport_start_sample'])
+            end = self.sample_time(record['transport_end_sample_inclusive']) + 1 / self.rate
+            if start > end or start < self.declared_low or end > self.declared_high:
+                raise ReportError('Diagnostic codec transport exceeds frozen source coverage')
+            if boolean(record.get('source_interval_known', False)) and (low is None or low < start or high > end):
+                raise ReportError('Diagnostic codec source interval exceeds its transport')
 
     def comparison(self, path):
         self.active_source = path.name
@@ -613,9 +725,11 @@ def build(args):
     else:
         builder.sources.append({'path': str(source), 'kind': 'JSONL v1'})
         builder.json_input(source, True)
-    for option in ('health', 'pcm', 'status_changes'):
+    for option in ('health', 'pcm', 'status_changes', 'codecs'):
         path = getattr(args, option)
         if path:
+            if option in builder.bundle_roles:
+                raise ReportError('Diagnostic bundle already supplies ' + option + '; omit the duplicate explicit companion')
             builder.sources.append({'path': str(path), 'kind': option})
             builder.json_input(Path(path))
     if args.comparison:
@@ -629,7 +743,7 @@ def parser():
     p.add_argument('input', help='Version-1 decoded JSONL or four-CSV bundle directory')
     p.add_argument('-o', '--output', required=True, help='Standalone HTML file (atomic replacement)')
     p.add_argument('--title', default='S/PDIF capture report')
-    for name in ('health', 'pcm', 'status-changes', 'comparison'):
+    for name in ('health', 'pcm', 'status-changes', 'codecs', 'comparison'):
         p.add_argument('--' + name, help='Optional version-1 analysis export')
     p.add_argument('--max-input-bytes', type=int, default=128 * 1024 * 1024)
     p.add_argument('--max-records', type=int, default=2_000_000)
@@ -648,7 +762,7 @@ def main(argv=None):
         p.error('Invalid input/record/event/plot/output budgets (see --help)')
     try:
         output = Path(args.output).resolve()
-        inputs = [Path(args.input)] + [Path(getattr(args, n)) for n in ('health', 'pcm', 'status_changes', 'comparison') if getattr(args, n)]
+        inputs = [Path(args.input)] + [Path(getattr(args, n)) for n in ('health', 'pcm', 'status_changes', 'codecs', 'comparison') if getattr(args, n)]
         if any(output == value.resolve() or value.is_dir() and output.parent == value.resolve() for value in inputs):
             raise ReportError('Output must not overwrite an input or its bundle directory')
         with localcontext() as context:

@@ -7,6 +7,7 @@
 #include <iosfwd>
 #include <memory>
 #include <string>
+#include <vector>
 namespace spdif::exports {
 struct WavConfig {
  double capture_rate=0;
@@ -42,11 +43,26 @@ struct BundleSpec {
  double capture_rate=0;
  std::string settings_json="{}"; // Caller-provided JSON object, included verbatim.
  uint64_t coverage_start=0,coverage_end=0; // Inclusive source sample indices.
+ std::string snapshot_id; // Required when diagnostic companions are supplied.
 };
-struct BundleResult { bool complete=false;std::array<uint64_t,4> rows_written{}; };
+struct CompanionSource {
+ // Diagnostic v1 requires exactly health/health.json/json, pcm/pcm.jsonl/jsonl,
+ // status_changes/status-changes.jsonl/jsonl, codecs/codec-frames.jsonl/jsonl.
+ std::string role,file,format;
+ uint64_t record_count=0; // Top-level records INCLUDING JSONL metadata; JSON=1.
+ // Write one record without its final newline. False means cancelled. A large
+ // JSON document may poll cancelled internally; only a whole record is counted.
+ std::function<bool(uint64_t,std::ostream&,const std::function<bool()>& cancelled)> write_record;
+};
+struct BundleResult {
+ bool complete=false;std::array<uint64_t,4> rows_written{};
+ std::vector<uint64_t> companion_written;
+ std::vector<bool> companion_complete;
+};
 // Source callbacks must address one immutable snapshot; no history is copied.
 // Requires a new directory. Cancellation keeps manifest complete:false and an
 // INCOMPLETE marker. I/O/source exceptions also preserve that incomplete state.
 BundleResult write_bundle(const std::filesystem::path& new_directory,const BundleSpec&,
- const std::array<CsvSource,4>&,std::function<bool()> cancelled={});
+ const std::array<CsvSource,4>&,std::function<bool()> cancelled={},
+ const std::vector<CompanionSource>& companions={});
 }

@@ -21,6 +21,7 @@ void SpdifResults::PublishSnapshot(U64 observed_sample,const std::optional<spdif
  // Single worker, outside Decoder.edge: no callback batch or legacy field group
  // is half written. Read SDK scalars BEFORE acquiring the metadata mutex.
  Snapshot s;s.pending_header=pending_header;s.capture_rate=analyzer->GetSampleRate();s.trigger=analyzer->GetTriggerSample();
+ s.snapshot_id=analysis_id+"-"+std::to_string(++snapshot_sequence);
  s.detail=settings->detail;s.output=settings->output;s.csv_export=settings->csv_export;
  s.channel=settings->channel.mChannelIndex;s.pcm_bits=settings->pcm_bits;s.wav_rate=settings->wav_rate;s.assume_stereo=settings->assume_stereo;s.table_samples=settings->table_samples;
  spdif::json::Object config;
@@ -76,15 +77,71 @@ void SpdifResults::CsvRow(unsigned kind,U64 row,std::ostream& out,const Snapshot
  }else if(kind==2){spdif::Diagnostic d;{std::lock_guard<std::mutex> lock(mutex);d=diagnostics.at(size_t(row));}out<<time(d.start)<<','<<time(d.end)<<','<<csv(d.code)<<','<<csv(d.message);
  }else{spdif::ContentInfo c;{std::lock_guard<std::mutex> lock(mutex);c=content_events.at(size_t(row));}out<<time(c.start)<<','<<time(c.end)<<','<<csv(spdif::content_name(c.format))<<','<<c.burst<<','<<c.complete<<','<<c.integrity<<','<<hex(c.pc,4)<<','<<c.pd<<','<<csv(c.evidence);}
 }
+std::vector<spdif::codec::CodecInfo> SpdifResults::PrefixCodecs(const Snapshot& s){
+ std::vector<spdif::codec::CodecInfo> prefix;
+ if((s.bursts&&!s.tail_burst.closed)||s.pending_header){
+  spdif::codec::Inspector inspector([&](const spdif::codec::CodecInfo& c){
+   if(prefix.size()>=spdif::codec::max_payload_bytes+1)throw std::runtime_error("Codec prefix record budget exceeded");
+   prefix.push_back(c);
+  });
+  if(s.bursts&&!s.tail_burst.closed)ReplayBurst(s.tail_burst,s,[&](const spdif::BurstEvent& e){inspector.burst(e);});
+  if(s.pending_header)inspector.burst(*s.pending_header);
+  inspector.finish();
+ }
+ return prefix; // Only the bounded unfinished transport, never history copies.
+}
+uint64_t SpdifResults::ReportRecords(unsigned mode,const Snapshot& s,size_t prefix_count)const{
+ switch(mode){case 1:return 1;case 2:return 1+s.changes;case 3:return 1+s.pcm+s.current_pcm.size();case 7:return 1+s.codecs+prefix_count;default:throw std::invalid_argument("Unknown analysis report mode");}
+}
+bool SpdifResults::WriteReportRecord(unsigned mode,uint64_t row,std::ostream& out,const Snapshot& s,
+ const std::vector<spdif::codec::CodecInfo>& prefix,const std::function<bool()>& cancelled){
+ if(cancelled&&cancelled())return false;
+ const auto context=[&](spdif::json::Object o){return o.text("analyzer_version",spdif::analyzer_version).text("input_channel","D"+std::to_string(s.channel)).number("capture_rate_hz",s.capture_rate).sample("origin_sample",s.start).sample("coverage_start_sample",s.start).sample("coverage_end_sample_inclusive",s.end).raw("settings",s.settings_json).text("snapshot_id",s.snapshot_id).boolean("live_snapshot",true);};
+ if(mode==1){
+  if(row)throw std::out_of_range("Health report contains one JSON document");
+  auto record=spdif::json::health_fields(context(spdif::json::event("summary")),s.summary);record.pop_back();out<<record<<",\"health_windows\":[";
+  for(size_t i=0;i<s.health;++i){
+   if(cancelled&&cancelled())return false;
+   spdif::HealthWindow h;{std::lock_guard<std::mutex> lock(mutex);h=health_windows.at(i);}
+   if(i)out<<',';
+   out<<spdif::json::record(h);checked(out);
+  }
+  out<<"]}";return true;
+ }
+ if(!row){out<<context(spdif::json::event("metadata")).str();return true;}
+ --row;
+ if(mode==2){
+  spdif::StatusChange change;{std::lock_guard<std::mutex> lock(mutex);change=status_changes.at(size_t(row));}
+  out<<spdif::json::record(change);
+ }else if(mode==3){
+  if(row<s.pcm){spdif::PcmWindow value;{std::lock_guard<std::mutex> lock(mutex);value=pcm_windows.at(size_t(row));}out<<spdif::json::record(value);}
+  else{auto record=spdif::json::record(s.current_pcm.at(size_t(row-s.pcm)));record.pop_back();out<<record<<",\"live_snapshot\":true}";}
+ }else if(mode==7){
+  if(row<s.codecs){spdif::codec::CodecInfo value;{std::lock_guard<std::mutex> lock(mutex);value=codec_events.at(size_t(row));}out<<spdif::json::record(value);}
+  else{auto record=spdif::json::record(prefix.at(size_t(row-s.codecs)));record.pop_back();out<<record<<",\"snapshot_prefix\":true,\"live_snapshot\":true}";}
+ }else throw std::invalid_argument("Unknown analysis report mode");
+ return true;
+}
 void SpdifResults::ExportOutput(const char* name,const Snapshot& s){
  const auto cancelled=[&](U64 n,U64 total){return UpdateExportProgressAndCheckForCancel(n,total);};
  if(s.output==6){
+  // Freeze was called once by GenerateExportFile. Preparing a bounded tail
+  // before opening outputs never finalizes or modifies the live decoder.
+  const auto prefix=PrefixCodecs(s);
   spdif::exports::BundleSpec spec;spec.input_channel="D"+std::to_string(s.channel);spec.capture_rate=s.capture_rate;spec.coverage_start=s.start;spec.coverage_end=s.end;
-  spec.settings_json=s.settings_json;
+  spec.settings_json=s.settings_json;spec.snapshot_id=s.snapshot_id;
   std::array<spdif::exports::CsvSource,4> source;const std::array<U64,4> counts={s.samples,s.status,s.diagnostics,s.content};
   U64 done=0,total=0;for(auto n:counts)total+=n;
   for(unsigned kind=0;kind<4;++kind){source[kind].header=CsvHeader(kind);source[kind].row_count=counts[kind];source[kind].write_row=[&,kind](uint64_t row,std::ostream& out){CsvRow(kind,row,out,s);++done;};}
-  spdif::exports::write_bundle(std::string(name)+".bundle",spec,source,[&]{return cancelled(done,total);});return;
+  const unsigned modes[]={1,3,2,7};
+  const char* roles[]={"health","pcm","status_changes","codecs"};
+  const char* files[]={"health.json","pcm.jsonl","status-changes.jsonl","codec-frames.jsonl"};
+  std::vector<spdif::exports::CompanionSource> companions;
+  for(unsigned i=0;i<4;++i){
+   const unsigned mode=modes[i];spdif::exports::CompanionSource c;c.role=roles[i];c.file=files[i];c.format=mode==1?"json":"jsonl";c.record_count=ReportRecords(mode,s,prefix.size());total+=c.record_count;
+   c.write_record=[&,mode](uint64_t row,std::ostream& out,const std::function<bool()>& stop){const bool written=WriteReportRecord(mode,row,out,s,prefix,stop);if(written)++done;return written;};companions.push_back(std::move(c));
+  }
+  spdif::exports::write_bundle(std::string(name)+".bundle",spec,source,[&]{return cancelled(done,total);},companions);return;
  }
  if(s.output==4){
   spdif::exports::WavWriter writer(std::string(name)+".wav-export",{double(s.capture_rate),s.pcm_bits,s.wav_rate,s.assume_stereo});
@@ -104,37 +161,16 @@ void SpdifResults::ExportOutput(const char* name,const Snapshot& s){
   if(s.pending_header)send(*s.pending_header);
   inspector.finish();writer.finish();return;
  }
- std::ofstream out(name,std::ios::binary);checked(out);
- const auto context=[&](spdif::json::Object o){return o.text("analyzer_version",spdif::analyzer_version).text("input_channel","D"+std::to_string(s.channel)).number("capture_rate_hz",s.capture_rate).sample("origin_sample",s.start).sample("coverage_start_sample",s.start).sample("coverage_end_sample_inclusive",s.end).raw("settings",s.settings_json).boolean("live_snapshot",true);};
- if(s.output==1){
-  auto record=spdif::json::health_fields(context(spdif::json::event("summary")),s.summary);record.pop_back();out<<record<<",\"health_windows\":[";
-  for(size_t i=0;i<s.health;++i){
-   if(cancelled(i,s.health))throw std::runtime_error("Health window export cancelled");
-   spdif::HealthWindow h;{std::lock_guard<std::mutex> lock(mutex);h=health_windows.at(i);}
-   if(i)out<<',';
-   out<<spdif::json::record(h);
-  }
-  out<<"]}\n";
- }else if(s.output==2){
-  out<<context(spdif::json::event("metadata")).str()<<'\n';
-  for(size_t i=0;i<s.changes;++i){if(cancelled(i,s.changes))throw std::runtime_error("Status change export cancelled");spdif::StatusChange change;{std::lock_guard<std::mutex> lock(mutex);change=status_changes.at(i);}out<<spdif::json::record(change)<<'\n';}
- }else if(s.output==7){
-  out<<context(spdif::json::event("metadata")).str()<<'\n';
-  for(size_t i=0;i<s.codecs;++i){if(cancelled(i,s.codecs))throw std::runtime_error("Codec report cancelled");spdif::codec::CodecInfo c;{std::lock_guard<std::mutex> lock(mutex);c=codec_events.at(i);}out<<spdif::json::record(c)<<'\n';}
-  // Replay only the frozen unfinished tail: a prefix snapshot, not capture EOF.
-  if((s.bursts&&!s.tail_burst.closed)||s.pending_header){
-   spdif::codec::Inspector prefix_inspector([&](const spdif::codec::CodecInfo& c){auto record=spdif::json::record(c);record.pop_back();out<<record<<",\"snapshot_prefix\":true,\"live_snapshot\":true}\n";});
-   if(s.bursts&&!s.tail_burst.closed)ReplayBurst(s.tail_burst,s,[&](const spdif::BurstEvent& e){prefix_inspector.burst(e);});
-   if(s.pending_header)prefix_inspector.burst(*s.pending_header);
-   prefix_inspector.finish();
-  }
- }else if(s.output==3){
-  out<<context(spdif::json::event("metadata")).str()<<'\n';
-  for(size_t i=0;i<s.pcm;++i){if(cancelled(i,s.pcm))throw std::runtime_error("PCM statistics export cancelled");spdif::PcmWindow p;{std::lock_guard<std::mutex> lock(mutex);p=pcm_windows.at(i);}out<<spdif::json::record(p)<<'\n';}
-  for(const auto& p:s.current_pcm){if(cancelled(s.pcm,s.pcm+s.current_pcm.size()))throw std::runtime_error("PCM statistics export cancelled");auto record=spdif::json::record(p);record.pop_back();out<<record<<",\"live_snapshot\":true}\n";}
+ const auto prefix=s.output==7?PrefixCodecs(s):std::vector<spdif::codec::CodecInfo>{};
+ const uint64_t count=ReportRecords(unsigned(s.output),s,prefix.size());
+ std::ofstream out(name,std::ios::binary);out.imbue(std::locale::classic());checked(out);
+ for(uint64_t row=0;row<count;++row){
+  if(!WriteReportRecord(unsigned(s.output),row,out,s,prefix,[&]{return cancelled(row,count);}))throw std::runtime_error("Analysis report export cancelled");
+  out<<'\n';checked(out);
  }
  out.flush();checked(out);out.close();checked(out);
 }
+
 void SpdifResults::GenerateExportFile(const char* name,DisplayBase,U32 kind){
  try{
   const auto snapshot=Freeze();
