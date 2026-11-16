@@ -49,4 +49,6 @@ WAV exports use a 24-bit integer WAVEFORMATEXTENSIBLE stereo container, with dec
 
 The CSV bundle preserves all four individual formats in one snapshot. Its manifest records version, input, sampling/settings, coverage and snapshot/written row counts. It streams frozen cursors rather than copying the subframe history. A bundle is complete only when its manifest says so and the `INCOMPLETE` marker is absent. Cancellation or I/O failure leaves explicit incomplete state. Existing directories are never overwritten.
 
+Version 0.4 enhances that same bundle with health, PCM-statistics, status-change and codec-frame companions from the identical snapshot. The report reader discovers them from the manifest and checks shared provenance and counts. Individual exports and settings archives remain compatible. See [package details](REPORT.md#diagnostic-snapshot-packages) and the separate [compressed path comparator](COMPARISON.md).
+
 In Logic, **Export output** selects reports or directory exports; **Selected CSV** preserves the existing **CSV export** choice. Directory exports append `.wav-export`, `.bursts`, or `.bundle` to the selected output filename. Errors are written to a separate `.error.json`; check this and the directory completion marker rather than relying only on the host's export toast.

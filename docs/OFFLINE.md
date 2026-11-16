@@ -51,3 +51,7 @@ The fixed-offset command and its schema remain unchanged without this option. A 
 A delay-change candidate requires stable supported plateaus and ordered mapping evidence around the transition. Its interval is a conservative bracket, not an exact insertion position or proof of which device inserted/dropped data. Relative drift uses matched source timestamps and is informational: independent capture origins, clock calibration and correlated overlapping windows limit interpretation. No resampling or filled PCM is introduced.
 
 The standalone report can display this JSON alongside capture evidence; see [capture report usage](REPORT.md). Codec metadata and integrity records are described in [codec support](CODECS.md).
+
+## Compare compressed paths
+
+For AC-3/Dolby Digital and DTS payload comparison between paths such as D6 and D7, use `scripts/compare_compressed.py` on version-1 decoded JSONL exports. It compares raw payload evidence even when one path has a PCM/header conflict, without treating matching bytes as valid PCM or overriding the conflict. See [compressed comparison](COMPARISON.md) for bounded alignment, differences, exit codes and uncertainty. The PCM comparator above retains its existing behavior.

@@ -6,6 +6,8 @@ Version 0.2 retains BMC decoding, B/M/W preambles in either polarity, sample/fie
 
 Version 0.3 adds bounded [codec metadata and integrity checks](docs/CODECS.md), [windowed delay/drift analysis](docs/OFFLINE.md#track-changing-delay), a [standalone interactive report](docs/REPORT.md), [pipeline benchmarks and fuzzing](docs/PERFORMANCE.md), and [tagged release packaging](docs/RELEASING.md). Transport identification still does not imply successful audio decoding.
 
+Version 0.4 adds [compressed payload and status comparison](docs/COMPARISON.md) between two paths and a complete [diagnostic snapshot package](docs/REPORT.md#diagnostic-snapshot-packages). The package supplies report companions in one export without changing existing analyzer settings or CSV formats. Published v0.3.0 downloads remain unchanged; build current source for these additions.
+
 ## Build
 
 Windows requires Visual Studio 2019 or newer with C++, a Windows SDK, CMake 3.21+, and Git. Tests and offline scripts require Python 3.8+ (or build with `-DSPDIF_BUILD_TESTS=OFF` when only the plugin is needed). In PowerShell:
@@ -63,7 +65,7 @@ To repeat the demo application check, configure this analyzer on D0 **before** s
 
 ## Analysis and export selection
 
-Keep **Export output → Selected CSV** for the original CSV workflow. Other choices provide health JSON, status-change JSONL, PCM-statistics JSONL, codec-frame JSONL, segmented WAV, IEC61937 payload files, or one bundle containing all four CSV datasets. **Analysis window (ms)** controls summary windows; **PCM bits override** resolves unspecified precision explicitly. WAV rate/stereo overrides are optional and never bypass content, parity, or validity checks.
+Keep **Export output → Selected CSV** for the original CSV workflow. Other choices provide health JSON, status-change JSONL, PCM-statistics JSONL, codec-frame JSONL, segmented WAV, IEC61937 payload files, or **Analysis CSV bundle**, which contains all four CSV datasets and their diagnostic report companions from one snapshot. **Analysis window (ms)** controls summary windows; **PCM bits override** resolves unspecified precision explicitly. WAV rate/stereo overrides are optional and never bypass content, parity, or validity checks.
 
 New directory exports never overwrite an existing directory and remain marked `INCOMPLETE` after cancellation or I/O failure. Existing settings archives migrate with their original waveform/CSV choices preserved. Details and limitations are in [feature definitions](docs/FEATURES.md).
 

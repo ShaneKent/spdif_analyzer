@@ -15,6 +15,16 @@ The Windows x64 DLL passes the actual native loader, eleven settings interfaces,
 
 Every package generated its HTML report without companion arguments. D6 AC-3 subframes retain the previous exact CSV SHA-256 `15ed0e8285e03507952f989332c5837f7ecfb8fc5fad66ede8aba31c45e15ba4`; its eight codec records equal the independently checked offline reference. Report generation succeeded on native Windows; these data-ingestion tests do not claim new browser interaction coverage. Existing Linux/macOS GUI limitations and host export-cancellation limitations remain unchanged.
 
+Independent offline auditing additionally verified exact PCM accepted/excluded accounting, health totals, status masks, codec prefix coverage and lossless retention of every companion record in the generated HTML for all four native packages. Package milestone `7d24adc` passed all five CI jobs: [Windows/Linux/macOS, sanitizers and fuzz smoke](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43934478473).
+
+## Version 0.4 compressed comparison
+
+The comparator passes 29 independent decoded-word scenarios, including both reproduced review counterexamples: unsupported or incomplete payloads cannot report equal empty buffers, and overlapping candidate metadata cannot create independent anchors. Other cases cover callback ordering, literal header words, supported length units, partial high bits, changed bytes, raw parity, V flags, repetitions, crossing anchors, source gaps, missing observations, status conflicts, exact large indices, strict budgets and output non-overwrite.
+
+Reusing the saved physical D6/D7 recordings, the comparator matched eight AC-3 payloads exactly and reported the raw C-byte non-audio difference for every pair. DTS yielded seventeen complete exact pairs with the same status difference; its first D7 candidate terminated while provisional and the final candidates were truncated, so two edge correspondences remain explicitly unresolved. This conservative result does not erase the separately established eighteen source-exact D6 DTS payloads. An artificial parity-preserving one-bit change to a saved decoded AC-3 export was detected at byte offset 1 with one differing common bit. That injected case is simulated corruption, not a new physical fault.
+
+Native Windows runs all fourteen CTest targets successfully. Linux builds the native plugin and passes all fourteen targets. Native GUI tests on Linux/macOS are not claimed.
+
 ## Version 0.3 verification
 
 The foundation `4548dad` passed Windows x64, Linux x64, macOS arm64, sanitizer and bounded fuzz CI: [run 43147061216](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147061216). A real release-workflow dispatch also passed all platform tests, sanitizer/fuzz gates and aggregate package validation: [run 43147752973](https://github.com/ShaneKent/spdif_analyzer/actions/runs/43147752973). Its three production packages were independently downloaded and checked for actual binary architecture, source/SDK provenance, exact approved members, and internal/external hashes. Dispatch did not publish a release; these runs precede subsequent native-validation changes.

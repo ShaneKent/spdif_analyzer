@@ -45,3 +45,9 @@ Type constants and E-AC-3 length units were independently checked against the FF
 `test_cli.py` drives the actual edge executable and verifies JSONL, policies and exit codes. `test_compare.py` drives the comparator with independent offsets, mutations, holes, channel layouts, rate conflicts, clock drift, silence and finite repetitive signals. Repetition checks retain source indices and bound candidate work rather than removing missing positions.
 
 `SignalSource.cpp` is an independent QA-only native plugin. It is built to a separate directory and excluded from production installation/packages. See [native fixture generation and validation](../docs/INSTALL.md#reproducing-the-feature-integration-checks) for `scripts/smoke_features.py`; its offline verification can also run without the Saleae Python package.
+
+## Version 0.4 comparison and snapshot checks
+
+`test_compare_compressed.py` uses 29 independent hand-checked decoded-word scenarios, separate from the transition encoder/decoder. It covers exact/conflicting AC-3/DTS payloads, E-AC-3 length units, partial high bits, byte differences, unique and ambiguous correspondence, gaps, status coverage, overlapping candidate records, unsupported/incomplete evidence, parity and finite resource limits. Unknown payloads never compare equal merely because both buffers are empty. Run `python tests/test_compare_compressed.py`.
+
+The enhanced `test_exports.cpp` runs 118 checks including cancellation inside a partially written health document after all four CSVs complete, torn JSONL records, companion failures and per-file completion counts. `test_report.py` runs 39 tests including automatic diagnostic companions, mixed snapshots, out-of-coverage source/transport intervals, duplicate explicit roles, counts and shared budgets. Actual native saved-capture package validation is recorded in [VALIDATION.md](../docs/VALIDATION.md).
